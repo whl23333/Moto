@@ -1,0 +1,9 @@
+**/__pycache__
+data/*
+model_checkpoints
+**/local*
+.idea
+**/*.bin
+**/*.log
+**/output*
+**/eval_results*
