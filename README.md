@@ -4,7 +4,7 @@ Moto: Latent Motion Token as the Bridging Language for Robot Manipulation
 
 <a href='https://chenyi99.github.io/moto/'><img src='https://img.shields.io/badge/Project-Page-Green'></a>
 <a href=''><img src='https://img.shields.io/badge/Paper-Arxiv-red'></a> 
-<a href='https://huggingface.co/ChenYi99/EgoPlan-Video-LLaMA-2-7B'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Checkpoint-blue'></a>
+<a href='https://huggingface.co/TencentARC/Moto'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Checkpoint-blue'></a>
 </h1>
 
 ![image](assets/teaser.png?raw=true)
@@ -99,7 +99,7 @@ We release the Latent Motion Tokenizer, the pre-traiend Moto-GPT and the fine-tu
 
 ## 💻Inference
 
-### Generate latent motion trajectories with the pre-trained Moto-GPT
+### Generate latent motion trajectories with the pre-trained Moto-GPT and the Latent Motion Tokenizer
 ```bash
 conda activate moto
 export PROJECT_ROOT=[your path to Moto project]
@@ -138,4 +138,4 @@ tail -f evaluate_moto_gpt_in_simpler.log
 
 
 ## 🙌Acknowledgement
-This repo benefits from [Phenaki-Pytorch](https://github.com/lucidrains/phenaki-pytorch), [GR-1](https://github.com/bytedance/GR-1),  [GR1-Training](https://github.com/EDiRobotics/GR1-Training). Thanks for their wonderful works!
+This repo benefits from [Taming Transformers](https://github.com/CompVis/taming-transformers/), [Phenaki-Pytorch](https://github.com/lucidrains/phenaki-pytorch), [GR-1](https://github.com/bytedance/GR-1),  [GR1-Training](https://github.com/EDiRobotics/GR1-Training). Thanks for their wonderful works!
