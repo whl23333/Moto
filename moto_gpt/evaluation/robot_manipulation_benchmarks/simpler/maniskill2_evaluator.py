@@ -135,6 +135,9 @@ def run_maniskill2_eval_single_episode(
         images.append(image)
         timestep += 1
 
+        if success == "success":
+            break
+
     episode_stats = info.get("episode_stats", {})
 
     # save video
