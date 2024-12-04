@@ -99,7 +99,7 @@ We release the Latent Motion Tokenizer, the pre-traiend Moto-GPT and the fine-tu
 
 ## 💻Inference
 
-### Generate latent motion trajectories with the pre-trained Moto-GPT and the Latent Motion Tokenizer
+### Latent trajectory inference with the pre-trained Moto-GPT and the Latent Motion Tokenizer
 ```bash
 conda activate moto
 export PROJECT_ROOT=[your path to Moto project]
