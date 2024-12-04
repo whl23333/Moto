@@ -137,6 +137,12 @@ Copyright (c) 2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, 
 Copyright (c) 2006      Idiap Research Institute (Samy Bengio)
 Copyright (c) 2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
 
+2. lpips
+Copyright (c) 2018, Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, Oliver Wang
+All rights reserved.
+Source code of this software can be obtained from: https://github.com/richzhang/PerceptualSimilarity/
+
+
 A copy of the BSD 3-Clause License is included in this file.
 
 For the license of other third party components, please refer to the following URL:
