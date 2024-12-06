@@ -3,7 +3,7 @@
 Moto: Latent Motion Token as the Bridging Language for Robot Manipulation
 
 <a href='https://chenyi99.github.io/moto/'><img src='https://img.shields.io/badge/Project-Page-Green'></a>
-<a href=''><img src='https://img.shields.io/badge/Paper-Arxiv-red'></a> 
+<a href='https://arxiv.org/abs/2412.04445'><img src='https://img.shields.io/badge/Paper-Arxiv-red'></a> 
 <a href='https://huggingface.co/TencentARC/Moto'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Checkpoint-blue'></a>
 </h1>
 
@@ -136,6 +136,20 @@ tail -f evaluate_moto_gpt_in_simpler.log
 - [ ] Release the trainig code
 
 
+## 📚Citation
+If you find our project helpful, hope you can star our repository and cite our paper as follows:
+
+```
+@misc{chen2024motolatentmotiontoken,
+      title={Moto: Latent Motion Token as the Bridging Language for Robot Manipulation}, 
+      author={Yi Chen and Yuying Ge and Yizhuo Li and Yixiao Ge and Mingyu Ding and Ying Shan and Xihui Liu},
+      year={2024},
+      eprint={2412.04445},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2412.04445}, 
+}
+```
 
 ## 🙌Acknowledgement
 This repo benefits from [Taming Transformers](https://github.com/CompVis/taming-transformers/), [Phenaki-Pytorch](https://github.com/lucidrains/phenaki-pytorch), [GR-1](https://github.com/bytedance/GR-1),  [GR1-Training](https://github.com/EDiRobotics/GR1-Training). Thanks for their wonderful works!
