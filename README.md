@@ -140,14 +140,11 @@ tail -f evaluate_moto_gpt_in_simpler.log
 If you find our project helpful, hope you can star our repository and cite our paper as follows:
 
 ```
-@misc{chen2024motolatentmotiontoken,
-      title={Moto: Latent Motion Token as the Bridging Language for Robot Manipulation}, 
-      author={Yi Chen and Yuying Ge and Yizhuo Li and Yixiao Ge and Mingyu Ding and Ying Shan and Xihui Liu},
-      year={2024},
-      eprint={2412.04445},
-      archivePrefix={arXiv},
-      primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2412.04445}, 
+@article{chen2024moto,
+  title={Moto: Latent Motion Token as the Bridging Language for Robot Manipulation},
+  author={Chen, Yi and Ge, Yuying and Li, Yizhuo and Ge, Yixiao and Ding, Mingyu and Shan, Ying and Liu, Xihui},
+  journal={arXiv preprint arXiv:2412.04445},
+  year={2024}
 }
 ```
 
