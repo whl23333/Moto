@@ -1,9 +1,9 @@
 """Code to evaluate SIMPLER."""
 import pyrootutils
-import os
-import sys
+# import os
+# import sys
 pyrootutils.setup_root(__file__, indicator='.project-root', pythonpath=True, dotenv=True)
-from moto_gpt.src.models.model_utils import load_moto_gpt_policy
+from common.models.model_utils import load_moto_gpt_policy
 
 
 from collections import defaultdict
@@ -11,12 +11,12 @@ from typing import Optional, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
-import tensorflow_hub as hub
-import tf_agents
-from tf_agents.policies import py_tf_eager_policy
-from tf_agents.trajectories import time_step as ts
+# import tensorflow_hub as hub
+# import tf_agents
+# from tf_agents.policies import py_tf_eager_policy
+# from tf_agents.trajectories import time_step as ts
 from transforms3d.euler import euler2axangle
-import json
+# import json
 import torch
 
 

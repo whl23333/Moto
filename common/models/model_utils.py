@@ -1,14 +1,16 @@
+import pyrootutils
+pyrootutils.setup_root(__file__, indicator='.project-root', pythonpath=True, dotenv=True)
 import omegaconf
 import hydra
-import pyrootutils
 import os
 import sys
 import torch
-pyrootutils.setup_root(__file__, indicator='.project-root', pythonpath=True, dotenv=True)
 from moto_gpt.src.models.moto_gpt_policy_wraper import MotoGPT_PolicyWraper
 from transformers import AutoTokenizer
 from transformers.utils import FEATURE_EXTRACTOR_NAME, get_file_from_repo
+from common.processors.preprocessor_utils import get_model_vision_basic_config
 import json
+
 
 def load_model(pretrained_path):
     config_path = os.path.join(pretrained_path, "config.yaml")
@@ -32,16 +34,21 @@ def load_moto_gpt_policy(args):
     moto_gpt_config = moto_gpt.config
 
     lang_tokenizer = AutoTokenizer.from_pretrained(moto_gpt_config['model_lang']['pretrained_model_name_or_path'])
-    vision_processor_config = json.load(open(get_file_from_repo(moto_gpt_config['model_vision']['pretrained_model_name_or_path'], FEATURE_EXTRACTOR_NAME)))
+    # vision_processor_config = json.load(open(get_file_from_repo(moto_gpt_config['model_vision']['pretrained_model_name_or_path'], FEATURE_EXTRACTOR_NAME)))
+    # rgb_shape = [vision_processor_config['size'], vision_processor_config['size']]
+    # rgb_mean = vision_processor_config['image_mean']
+    # rgb_std = vision_processor_config['image_std']
+    model_vision_basic_config = get_model_vision_basic_config(moto_gpt_config['model_vision']['pretrained_model_name_or_path'])
+
 
     variant = {
         'test_chunk_size': args.test_chunk_size,
         'is_gripper_binary': args.is_gripper_binary,
         'use_temporal_ensemble': args.use_temporal_ensemble,
 
-        'rgb_shape': [vision_processor_config['size'], vision_processor_config['size']],
-        'rgb_mean': vision_processor_config['image_mean'],
-        'rgb_std': vision_processor_config['image_std'],
+        # 'rgb_shape': rgb_shape,
+        # 'rgb_mean': rgb_mean,
+        # 'rgb_std': rgb_mean,
 
         'act_dim': moto_gpt_config['act_dim'],
         'seq_len': moto_gpt_config['sequence_length'],
@@ -49,7 +56,9 @@ def load_moto_gpt_policy(args):
         'mask_latent_motion_probability': moto_gpt_config['mask_latent_motion_probability'],
         'latent_motion_pred': moto_gpt_config['latent_motion_pred'],
         'per_latent_motion_len': moto_gpt_config['per_latent_motion_len'],
+        'pred_discrete_arm_action': moto_gpt_config.get('pred_discrete_arm_action', False) # NOTE 2024/12/17: predict discrete arm actions for berkeley_fanuc_manipulation
     }
+    variant.update(model_vision_basic_config)
 
     latent_motion_decoding_kwargs = {
         'temperature': args.temperature, 

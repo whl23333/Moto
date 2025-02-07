@@ -19,7 +19,7 @@ m_former:
     attention_probs_dropout_prob: 0.0
     hidden_act: "gelu"
     hidden_dropout_prob: 0.0
-    hidden_size: 768 # the hidden size of MAE decoder is 512
+    hidden_size: 768
     initializer_range: 0.02
     intermediate_size: 3072
     layer_norm_eps: 1e-12

@@ -15,10 +15,26 @@ class LMDViTEmbeddings(nn.Module):
         super().__init__()
         query_num = config.query_num
         self.query_num = query_num
-        self.query_pooling_layer = nn.Linear(query_num * config.hidden_size, config.hidden_size)
-        self.patch_embeddings = ViTPatchEmbeddings(config)
-        num_patches = self.patch_embeddings.num_patches
-        self.position_embeddings = nn.Parameter(torch.randn(1, num_patches, config.hidden_size))
+
+        is_io_hidden_states = getattr(config, 'is_io_hidden_states', False)
+        if is_io_hidden_states:
+            self.patch_embeddings = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
+        else:
+            self.patch_embeddings = ViTPatchEmbeddings(config)
+
+        query_fusion_mode = getattr(config, 'query_fusion_mode', 'add')
+        assert query_fusion_mode in ['add', 'concat']
+        self.query_fusion_mode = query_fusion_mode
+        self.query_pooling_layer = nn.Linear(query_num * config.hidden_size, config.hidden_size) if query_fusion_mode == 'add' else None
+        # print(f"query_fusion_mode: {query_fusion_mode}")
+
+        use_mask_token = getattr(config, 'use_mask_token', False)
+        self.use_mask_token = use_mask_token
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size)) if use_mask_token else None
+        # print(f"use_mask_token: {use_mask_token}")
+
+        seq_len = config.num_patches*(1+use_mask_token) + (query_fusion_mode=='concat') * query_num
+        self.position_embeddings = nn.Parameter(torch.randn(1, seq_len, config.hidden_size))
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.config = config
 
@@ -27,13 +43,23 @@ class LMDViTEmbeddings(nn.Module):
         pixel_values: torch.Tensor,
         latent_motion_tokens: torch.Tensor,
     ) -> torch.Tensor:
-        batch_size, num_channels, height, width = pixel_values.shape
+        batch_size = pixel_values.shape[0]
         embeddings = self.patch_embeddings(pixel_values)
 
-        # add the projected motion token to the embedded patch tokens
-        latent_motion_tokens = latent_motion_tokens.reshape(batch_size, 1, -1)
-        latent_motion_tokens = self.query_pooling_layer(latent_motion_tokens)
-        embeddings = embeddings + latent_motion_tokens
+        # insert [MASK] tokens to inputs
+        if self.use_mask_token:
+            num_patches = self.config.num_patches
+            mask_tokens = self.mask_token.expand(batch_size, num_patches, -1)
+            embeddings = torch.cat((embeddings, mask_tokens), dim=1)
+
+        if self.query_fusion_mode == 'add':
+            # add the projected motion token to the embedded patch tokens
+            latent_motion_tokens = latent_motion_tokens.reshape(batch_size, 1, -1)
+            latent_motion_tokens = self.query_pooling_layer(latent_motion_tokens)
+            embeddings = embeddings + latent_motion_tokens
+        elif self.query_fusion_mode == 'concat':
+            # concatenate latent motion tokens with the embedded patch tokens
+            embeddings = torch.cat((latent_motion_tokens, embeddings), dim=1)
 
         # add positional encoding to each token
         embeddings = embeddings + self.position_embeddings
@@ -65,6 +91,8 @@ class LMDViTModel(ViTPreTrainedModel):
 
         super().__init__(config)
         self.config = config
+        is_io_hidden_states = getattr(config, 'is_io_hidden_states', False)
+        self.is_io_hidden_states = is_io_hidden_states
 
         self.embeddings = LMDViTEmbeddings(config)
         self.encoder = ViTEncoder(config)
@@ -137,7 +165,10 @@ class LMDViTModel(ViTPreTrainedModel):
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
         # TODO: maybe have a cleaner way to cast the input (from `ImageProcessor` side?)
-        expected_dtype = self.embeddings.patch_embeddings.projection.weight.dtype
+        if self.is_io_hidden_states:
+            expected_dtype = self.embeddings.patch_embeddings.weight.dtype
+        else:
+            expected_dtype = self.embeddings.patch_embeddings.projection.weight.dtype
         if pixel_values.dtype != expected_dtype:
             pixel_values = pixel_values.to(expected_dtype)
 

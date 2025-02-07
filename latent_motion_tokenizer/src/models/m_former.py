@@ -21,6 +21,10 @@ class MFormerEmbeddings(nn.Module):
         self.token_type_embeddings = nn.Parameter(torch.randn(2, config.hidden_size))
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.config = config
+        if hasattr(config, "legacy"):
+            self.legacy = config.legacy
+        else:
+            self.legacy = True
 
     def forward(
         self,
@@ -43,7 +47,10 @@ class MFormerEmbeddings(nn.Module):
 
         # add token type encoding to each token
         cond_token_type_embeddings = self.token_type_embeddings[0].expand(batch_size, per_seq_length + self.query_num + 1, -1)
-        target_token_type_embeddings = self.token_type_embeddings[0].expand(batch_size, per_seq_length, -1) # BUG: should be self.token_type_embeddings[1], to be fixed
+        if self.legacy:
+            target_token_type_embeddings = self.token_type_embeddings[0].expand(batch_size, per_seq_length, -1)
+        else:
+            target_token_type_embeddings = self.token_type_embeddings[1].expand(batch_size, per_seq_length, -1)
         token_type_embeddings = torch.cat((cond_token_type_embeddings, target_token_type_embeddings), dim=1)
         embeddings = embeddings + token_type_embeddings
 

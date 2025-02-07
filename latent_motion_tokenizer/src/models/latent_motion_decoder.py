@@ -15,18 +15,30 @@ class LatentMotionDecoder(nn.Module):
         self.config = config
         self.transformer = LMDViTModel(config, add_pooling_layer=False)
 
-        self.decoder = nn.Sequential(
-            nn.Conv2d(
-                in_channels=config.hidden_size,
-                out_channels=config.encoder_stride**2 * config.num_channels,
-                kernel_size=1,
-            ),
-            nn.PixelShuffle(config.encoder_stride),
-        )
+        is_io_hidden_states = getattr(config, 'is_io_hidden_states', False)
+        self.is_io_hidden_states = is_io_hidden_states
 
-        self.decoder[0].weight.data = nn.init.trunc_normal_(
-            self.decoder[0].weight.data.to(torch.float32), mean=0.0, std=self.config.initializer_range
-        ).to(self.decoder[0].weight.dtype)
+        if is_io_hidden_states:
+            self.decoder = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
+
+            self.decoder.weight.data = nn.init.trunc_normal_(
+                self.decoder.weight.data.to(torch.float32), mean=0.0, std=self.config.initializer_range
+            ).to(self.decoder.weight.dtype)
+            self.decoder.bias.data.zero_()
+
+        else:
+            self.decoder = nn.Sequential(
+                nn.Conv2d(
+                    in_channels=config.hidden_size,
+                    out_channels=config.encoder_stride**2 * config.num_channels,
+                    kernel_size=1,
+                ),
+                nn.PixelShuffle(config.encoder_stride),
+            )
+
+            self.decoder[0].weight.data = nn.init.trunc_normal_(
+                self.decoder[0].weight.data.to(torch.float32), mean=0.0, std=self.config.initializer_range
+            ).to(self.decoder[0].weight.dtype)
 
 
     def forward(
@@ -36,15 +48,18 @@ class LatentMotionDecoder(nn.Module):
     ) -> torch.Tensor:
 
         outputs = self.transformer(
-            cond_input,
+            pixel_values=cond_input,
             latent_motion_tokens=latent_motion_tokens
         )
 
         sequence_output = outputs[0]
         sequence_output = sequence_output[:, -self.config.num_patches:]
         batch_size, sequence_length, num_channels = sequence_output.shape
-        height = width = math.floor(sequence_length**0.5)
-        sequence_output = sequence_output.permute(0, 2, 1).reshape(batch_size, num_channels, height, width)
+
+        if not self.is_io_hidden_states:
+            height = width = math.floor(sequence_length**0.5)
+            sequence_output = sequence_output.permute(0, 2, 1).contiguous().reshape(batch_size, num_channels, height, width)
+
         reconstructed_output = self.decoder(sequence_output)
 
         return reconstructed_output

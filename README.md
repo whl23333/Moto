@@ -21,7 +21,7 @@ To this end, we introduce <b>Moto</b>, which converts video content into latent 
 We pre-train Moto-GPT through motion token autoregression, enabling it to capture diverse visual motion knowledge. After pre-training, Moto-GPT demonstrates the promising ability to produce semantically interpretable motion tokens, predict plausible motion trajectories, and assess trajectory rationality through output likelihood.
 To transfer learned motion priors to real robot actions, we implement a co-fine-tuning strategy that seamlessly bridges latent motion token prediction and real robot control. Extensive experiments show that the fine-tuned Moto-GPT exhibits superior robustness and efficiency on robot manipulation benchmarks, underscoring its effectiveness in transferring knowledge from video data to downstream visual manipulations.
 
-## ⚙️Quick Start
+## 🛠️Quick Start
 
 ### Installation
 Clone this repo:
@@ -97,7 +97,7 @@ cd ..
 ### Model Weights
 We release the Latent Motion Tokenizer, the pre-traiend Moto-GPT and the fine-tuned Moto-GPT in [Moto Hugging Face](https://huggingface.co/TencentARC/Moto). You can download them separately and save them in corresponding directories ([`latent_motion_tokenizer/checkpoints/`](latent_motion_tokenizer/checkpoints) and [`moto_gpt/checkpoints/`](moto_gpt/checkpoints)).
 
-## 💻Inference
+## 🤖Inference
 
 ### Latent trajectory inference with the pre-trained Moto-GPT and the Latent Motion Tokenizer
 ```bash
@@ -129,11 +129,145 @@ nohup bash evaluate_moto_gpt_in_simpler.sh > evaluate_moto_gpt_in_simpler.log 2>
 tail -f evaluate_moto_gpt_in_simpler.log
 ```
 
+## 🔥Training
+### Prepare Datasets
+#### 1. CALVIN dataset
+- Download and preprocess Split ABC->D dataset from [CALVIN](https://github.com/mees/calvin/tree/main/dataset):
+```bash
+conda activate moto
+export PROJECT_ROOT=[your path to Moto project]
+export OUTPUT_ROOT=[your path to save datasets]
+cd ${PROJECT_ROOT}/scripts/
+nohup bash download_and_preprocess_calvin_data.sh > download_and_preprocess_calvin_data.log 2>&1 &
+tail -f download_and_preprocess_calvin_data.log
+```
+
+#### 2. Open X-Embodiment datasets
+- Install [gsutil](https://cloud.google.com/storage/docs/gsutil_install)
+
+- Download and preprocess datasets from [Open X-Embodiment](https://github.com/google-deepmind/open_x_embodiment):
+```bash
+conda activate moto
+pip install tensorflow-datasets
+export PROJECT_ROOT=[your path to Moto project]
+export OUTPUT_ROOT=[your path to save datasets]
+cd ${PROJECT_ROOT}/scripts/
+nohup bash download_and_preprocess_oxe_data.sh > download_and_preprocess_oxe_data.log 2>&1 &
+tail -f download_and_preprocess_oxe_data.log
+```
+
+<!-- - Modify the `video_dir` and `lmdb_dir` fields in data configs from [latent_motion_tokenizer/configs/data/](latent_motion_tokenizer/configs/data/) and [moto_gpt/configs/data/](moto_gpt/configs/data/) -->
+
+### Training Latent Motion Tokenizer
+#### 1. Training on CALVIN dataset
+- Modify the `npz_dir` field in [latent_motion_tokenizer/configs/data/calvin.yaml](latent_motion_tokenizer/configs/data/calvin.yaml)
+
+- Config the paths in [latent_motion_tokenizer/configs/train/data_calvin-vq_size128_dim32_num8_legacyTrue-vision_MaeLarge-decoder_queryFusionModeAdd_Patch196_useMaskFalse-mformer_legacyTrue-train_lr0.0001_bs256-aug_shiftTrue_resizedCropFalse.yaml](latent_motion_tokenizer/configs/train/data_calvin-vq_size128_dim32_num8_legacyTrue-vision_MaeLarge-decoder_queryFusionModeAdd_Patch196_useMaskFalse-mformer_legacyTrue-train_lr0.0001_bs256-aug_shiftTrue_resizedCropFalse.yaml)
+
+- Run the following commands:
+
+```bash
+conda activate moto
+export PROJECT_ROOT=[your path to Moto project]
+export CONFIG_NAME="data_calvin-vq_size128_dim32_num8_legacyTrue-vision_MaeLarge-decoder_queryFusionModeAdd_Patch196_useMaskFalse-mformer_legacyTrue-train_lr0.0001_bs256-aug_shiftTrue_resizedCropFalse"
+cd ${PROJECT_ROOT}/scripts/
+nohup bash train_latent_motion_tokenizer_on_calvin.sh > train_latent_motion_tokenizer_on_calvin.log 2>&1 &
+tail -f train_latent_motion_tokenizer_on_calvin.log
+```
+
+#### 2. Training on Open X-Embodiment datasets
+- Modify the `video_dir` field in [latent_motion_tokenizer/configs/data/rtx.yaml](latent_motion_tokenizer/configs/data/rtx.yaml)
+
+- Config the paths in [latent_motion_tokenizer/configs/train/data_rtx-vq_size128_dim32_num8_legacyTrue-vision_MaeLarge-decoder_queryFusionModeAdd_Patch196_useMaskFalse-mformer_legacyTrue-train_lr0.001_bs256-aug_shiftTrue_resizedCropFalse.yaml](latent_motion_tokenizer/configs/train/data_rtx-vq_size128_dim32_num8_legacyTrue-vision_MaeLarge-decoder_queryFusionModeAdd_Patch196_useMaskFalse-mformer_legacyTrue-train_lr0.001_bs256-aug_shiftTrue_resizedCropFalse.yaml)
+
+- Run the following commands:
+
+```bash
+conda activate moto
+export PROJECT_ROOT=[your path to Moto project]
+export CONFIG_NAME="data_rtx-vq_size128_dim32_num8_legacyTrue-vision_MaeLarge-decoder_queryFusionModeAdd_Patch196_useMaskFalse-mformer_legacyTrue-train_lr0.001_bs256-aug_shiftTrue_resizedCropFalse"
+cd ${PROJECT_ROOT}/scripts/
+nohup bash train_latent_motion_tokenizer_on_oxe.sh > train_latent_motion_tokenizer_on_oxe.log 2>&1 &
+tail -f train_latent_motion_tokenizer_on_oxe.log
+```
+
+
+
+### Pre-training Moto-GPT
+#### 1. Pre-training on CALVIN dataset
+- Modify the `lmdb_dir` field in [moto_gpt/configs/data/calvin.yaml](moto_gpt/configs/data/calvin.yaml)
+
+- Config the paths in [moto_gpt/configs/train/data_calvin-model_actPredFalse_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5-train_lr0.0001_bs512-aug_shiftTrue_resizedCropFalse.yaml](moto_gpt/configs/train/data_calvin-model_actPredFalse_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5-train_lr0.0001_bs512-aug_shiftTrue_resizedCropFalse.yaml)
+
+- Run the following commands:
+
+```bash
+conda activate moto
+export PROJECT_ROOT=[your path to Moto project]
+export CONFIG_NAME="data_calvin-model_actPredFalse_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5-train_lr0.0001_bs512-aug_shiftTrue_resizedCropFalse"
+cd ${PROJECT_ROOT}/scripts/
+nohup bash pretrain_moto_gpt_on_calvin.sh > pretrain_moto_gpt_on_calvin.log 2>&1 &
+tail -f pretrain_moto_gpt_on_calvin.log
+```
+
+
+
+#### 2. Pre-training on Open X-Embodiment datasets
+- Modify the `video_dir` and `lmdb_dir` fields in [moto_gpt/configs/data/rtx.yaml](moto_gpt/configs/data/rtx.yaml)
+
+- Config the paths in [moto_gpt/configs/train/data_rtx-model_actPredFalse_motionPredTrue_visionMaeLarge_seq2_chunk3_maskProb0.5-train_lr0.001_bs512-aug_shiftTrue_resizedCropFalse.yaml](moto_gpt/configs/train/data_rtx-model_actPredFalse_motionPredTrue_visionMaeLarge_seq2_chunk3_maskProb0.5-train_lr0.001_bs512-aug_shiftTrue_resizedCropFalse.yaml)
+
+- Run the following commands:
+
+```bash
+conda activate moto
+export PROJECT_ROOT=[your path to Moto project]
+export CONFIG_NAME="data_rtx-model_actPredFalse_motionPredTrue_visionMaeLarge_seq2_chunk3_maskProb0.5-train_lr0.001_bs512-aug_shiftTrue_resizedCropFalse"
+ps aux | grep ${CONFIG_NAME} | awk '{print $2}' | xargs kill -9
+cd ${PROJECT_ROOT}/scripts/
+nohup bash pretrain_moto_gpt_on_oxe.sh > pretrain_moto_gpt_on_oxe.log 2>&1 &
+tail -f pretrain_moto_gpt_on_oxe.log
+```
+
+
+### Fine-tuning Moto-GPT
+#### 1. Fine-tuning on CALVIN dataset
+- Modify the `lmdb_dir` fields in [moto_gpt/configs/data/calvin.yaml](moto_gpt/configs/data/calvin.yaml)
+
+- Config the paths in [moto_gpt/configs/train/data_calvin-model_actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5-train_lr0.0002_bs512-aug_shiftTrue_resizedCropFalse-resume_from_predLatentOnly_calvin_Epoch10.yaml](moto_gpt/configs/train/data_calvin-model_actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5-train_lr0.0002_bs512-aug_shiftTrue_resizedCropFalse-resume_from_predLatentOnly_calvin_Epoch10.yaml)
+
+- Run the following commands:
+
+```bash
+conda activate moto
+export PROJECT_ROOT=[your path to Moto project]
+export CONFIG_NAME="data_calvin-model_actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5-train_lr0.0002_bs512-aug_shiftTrue_resizedCropFalse-resume_from_predLatentOnly_calvin_Epoch10"
+cd ${PROJECT_ROOT}/scripts/
+nohup bash finetune_moto_gpt_on_calvin.sh > finetune_moto_gpt_on_calvin.log 2>&1 &
+tail -f finetune_moto_gpt_on_calvin.log
+```
+
+#### 2. Fine-tuning on RT-1 dataset
+- Modify the `video_dir` and `lmdb_dir` fields in [moto_gpt/configs/data/rt1.yaml](moto_gpt/configs/data/rt1.yaml)
+
+- Config the paths in [moto_gpt/configs/train/data_rt1-model_actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk3_maskProb0.5-train_lr0.001_bs512-aug_shiftTrue_resizedCropFalse-resume_from_predLatentOnly_oxe_Epoch10.yaml](moto_gpt/configs/train/data_rt1-model_actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk3_maskProb0.5-train_lr0.001_bs512-aug_shiftTrue_resizedCropFalse-resume_from_predLatentOnly_oxe_Epoch10.yaml)
+
+- Run the following commands:
+
+```bash
+conda activate moto
+export PROJECT_ROOT=[your path to Moto project]
+export CONFIG_NAME="data_rt1-model_actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk3_maskProb0.5-train_lr0.001_bs512-aug_shiftTrue_resizedCropFalse-resume_from_predLatentOnly_oxe_Epoch10"
+cd ${PROJECT_ROOT}/scripts/
+nohup bash finetune_moto_gpt_on_rt1.sh > finetune_moto_gpt_on_rt1.log 2>&1 &
+tail -f finetune_moto_gpt_on_rt1.log
+```
+
 ## 📝To Do
 - [x] Release the Latent Motion Tokenizer
 - [x] Release the pre-trained and fine-tuned Moto-GPT
 - [x] Release the inference code
-- [ ] Release the trainig code
+- [x] Release the training code
 
 
 ## 📚Citation

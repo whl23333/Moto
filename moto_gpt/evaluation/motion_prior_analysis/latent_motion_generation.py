@@ -16,7 +16,7 @@ from functools import partial
 from transformers import AutoTokenizer
 from transformers.utils import FEATURE_EXTRACTOR_NAME, get_file_from_repo
 import numpy as np
-from moto_gpt.src.models.model_utils import load_model
+from common.models.model_utils import load_model
 
 def get_image_processor(vision_processor_config):
     input_size = (vision_processor_config['size'], vision_processor_config['size'])

@@ -26,7 +26,7 @@ import pyrootutils
 import os
 import sys
 pyrootutils.setup_root(__file__, indicator='.project-root', pythonpath=True, dotenv=True)
-from moto_gpt.src.models.model_utils import load_moto_gpt_policy
+from common.models.model_utils import load_moto_gpt_policy
 
 from omegaconf import OmegaConf
 import hydra

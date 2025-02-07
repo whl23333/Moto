@@ -29,7 +29,7 @@ class VectorQuantizer2(nn.Module):
         if self.remap is not None:
             self.register_buffer("used", torch.tensor(np.load(self.remap)))
             self.re_embed = self.used.shape[0]
-            self.unknown_index = unknown_index  # "random" or "extra" or integer
+            self.unknown_index = unknown_index  # "random" or "extra" or integer or "closest"
             if self.unknown_index == "extra":
                 self.unknown_index = self.re_embed
                 self.re_embed = self.re_embed + 1
@@ -39,6 +39,18 @@ class VectorQuantizer2(nn.Module):
             self.re_embed = n_e
 
         self.sane_index_shape = sane_index_shape
+
+    def setup_remap(self, remap, unknown_index):
+        self.remap = remap
+        self.register_buffer("used", torch.tensor(np.load(self.remap)))
+        self.re_embed = self.used.shape[0]
+        self.unknown_index = unknown_index  # "random" or "extra" or integer or "closest"
+        if self.unknown_index == "extra":
+            self.unknown_index = self.re_embed
+            self.re_embed = self.re_embed + 1
+        print(f"Remapping {self.n_e} indices to {self.re_embed} indices. "
+                f"Using {self.unknown_index} for unknown indices.")
+
 
     def remap_to_used(self, inds):
         ishape = inds.shape
@@ -72,9 +84,14 @@ class VectorQuantizer2(nn.Module):
         z_flattened = z.view(-1, self.e_dim)
 
         # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
+        if self.remap is not None and self.unknown_index == "closest":
+            embedding_weight = self.embedding(self.used)
+        else:
+            embedding_weight = self.embedding.weight
+
         d = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + \
-            torch.sum(self.embedding.weight ** 2, dim=1) - 2 * \
-            torch.einsum('bd,dn->bn', z_flattened, rearrange(self.embedding.weight, 'n d -> d n'))
+            torch.sum(embedding_weight ** 2, dim=1) - 2 * \
+            torch.einsum('bd,dn->bn', z_flattened, rearrange(embedding_weight, 'n d -> d n'))
 
         min_encoding_indices = torch.argmin(d, dim=1)
         z_q = self.embedding(min_encoding_indices).view(z.shape)
@@ -94,7 +111,7 @@ class VectorQuantizer2(nn.Module):
 
         # reshape back to match original input shape
         z_q = z_q.reshape(bz, -1, z_q.shape[-1])
-        if self.remap is not None:
+        if self.remap is not None and self.unknown_index != "closest":
             min_encoding_indices = min_encoding_indices.reshape(z.shape[0], -1)  # add batch axis
             min_encoding_indices = self.remap_to_used(min_encoding_indices)
             min_encoding_indices = min_encoding_indices.reshape(-1, 1)  # flatten
@@ -105,12 +122,15 @@ class VectorQuantizer2(nn.Module):
         return z_q, min_encoding_indices, loss
 
     def get_codebook_entry(self, indices):
-        if self.remap is not None:
+        if self.remap is not None and self.unknown_index != "closest":
             indices = indices.reshape(shape[0], -1)  # add batch axis
             indices = self.unmap_to_all(indices)
             indices = indices.reshape(-1)  # flatten again
 
         # get quantized latent vectors
-        z_q = self.embedding(indices)
+        if self.remap is not None and self.unknown_index == "closest":
+            z_q = self.embedding(self.used)[indices]
+        else:
+            z_q = self.embedding(indices)
 
         return z_q

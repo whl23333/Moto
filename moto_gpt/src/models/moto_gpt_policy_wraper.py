@@ -24,14 +24,13 @@ class MotoGPT_PolicyWraper:
     def __init__(self,
                  policy,
                  variant,
-                #  device,
                  latent_motion_decoding_kwargs,
                  lang_tokenizer
     ):
         """Constructor."""
         self.test_chunk_size = variant['test_chunk_size']
         self.is_gripper_binary = variant['is_gripper_binary']
-        # self.device = device
+        self.pred_discrete_arm_action = variant['pred_discrete_arm_action']
         self.lang_tokenizer = lang_tokenizer
 
         # Preprocess
@@ -72,7 +71,10 @@ class MotoGPT_PolicyWraper:
         self.rollout_step_counter = 0
 
         if self.use_temporal_ensemble:
-            self.action_buffer = np.zeros((self.test_chunk_size, self.test_chunk_size, self.act_dim))
+            if self.pred_discrete_arm_action:
+                self.action_buffer = np.zeros((self.test_chunk_size, self.test_chunk_size, (self.act_dim-1)*3+1))
+            else:
+                self.action_buffer = np.zeros((self.test_chunk_size, self.test_chunk_size, self.act_dim))
             self.action_buffer_mask = np.zeros((self.test_chunk_size, self.test_chunk_size), dtype=bool)
 
     def step(self, obs, goal):
@@ -147,7 +149,10 @@ class MotoGPT_PolicyWraper:
 
         # Arm action
         arm_action_preds = prediction['arm_action_preds']  # (1, t, chunk_size, act_dim - 1)
-        arm_action_preds = arm_action_preds.view(-1, self.act_dim - 1)  # (t*chunk_size, act_dim - 1)
+        if self.pred_discrete_arm_action:
+            arm_action_preds = arm_action_preds.view(-1, self.act_dim - 1, 3)
+        else:
+            arm_action_preds = arm_action_preds.view(-1, self.act_dim - 1)  # (t*chunk_size, act_dim - 1)
 
         # Gripper action
         gripper_action_preds = prediction['gripper_action_preds']  # (1, t, chunk_size, 1)
@@ -161,6 +166,10 @@ class MotoGPT_PolicyWraper:
         if not self.use_temporal_ensemble:
             if self.is_gripper_binary:
                 gripper_action_pred = ((gripper_action_pred > 0).float()) * 2.0 - 1.0
+            
+            if self.pred_discrete_arm_action:
+                arm_action_pred = arm_action_pred.softmax(dim=-1).argmax(dim=-1)
+                
             action_pred = torch.cat((arm_action_pred, gripper_action_pred), dim=-1)  # (test_chunk_size, act_dim)
             action_pred = action_pred.detach().cpu()
 
@@ -174,19 +183,30 @@ class MotoGPT_PolicyWraper:
 
 
             # Add to action buffer
-            action = torch.cat((arm_action_pred, gripper_action_pred), dim=-1) # (t*chunk_size, act_dim)
+            if self.pred_discrete_arm_action:
+                action = torch.cat((arm_action_pred.reshape(arm_action_pred.shape[0], -1), gripper_action_pred), dim=-1) # (t*chunk_size, (act_dim-1)*3+1)
+            else:
+                action = torch.cat((arm_action_pred, gripper_action_pred), dim=-1) # (t*chunk_size, act_dim)
             action = action.detach().cpu().numpy()
             self.action_buffer[0] = action
             self.action_buffer_mask[0] = True
             
             # Ensemble temporally to predict action
             action_pred = np.sum(self.action_buffer[:, 0, :] * self.action_buffer_mask[:, 0:1], axis=0) / np.sum(self.action_buffer_mask[:, 0], axis=0)
+            action_pred = torch.from_numpy(action_pred)
 
             # Make gripper action either -1 or 1
             if self.is_gripper_binary:
                 action_pred[-1] = 1 if action_pred[-1] > 0 else -1
+            
+            if self.pred_discrete_arm_action:
+                arm_action_pred = action_pred[:-1]
+                arm_action_pred = arm_action_pred.reshape(-1, 3)
+                arm_action_pred = arm_action_pred.softmax(dim=-1).argmax(dim=-1)
+                action_pred = torch.cat([arm_action_pred, action_pred[-1:]], dim=-1)
+            
+            action_pred = action_pred.reshape(1, self.act_dim)
 
-            action_pred = torch.tensor(action_pred.reshape(1, self.act_dim))
 
         self.rollout_step_counter += 1
         return action_pred

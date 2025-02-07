@@ -7,3 +7,4 @@ model_checkpoints
 **/*.log
 **/output*
 **/eval_results*
+**/berkeley_fanuc_manipulation

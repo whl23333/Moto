@@ -41,6 +41,9 @@ class MotoGPT(nn.Module):
             mask_latent_motion_probability=0.0, # 0.0: do not mask, 1.0: mask all, 0.5: mask 50% latent motions
             freeze_lang=True,
             freeze_vision=True,
+            pred_discrete_arm_action=False, # NOTE 2024/12/17: predict discrete arm actions for berkeley_fanuc_manipulation
+            use_timestep_embedding=False,
+            use_latent_motion_pos_embedding=False,
             **kwargs
     ):
         super().__init__()
@@ -90,6 +93,18 @@ class MotoGPT(nn.Module):
         # Embedding functions for latent motions
         self.embed_latent_motion = nn.Embedding(latent_motion_codebook_size, hidden_size)
 
+        # Timestep Embeddings
+        self.use_timestep_embedding = use_timestep_embedding
+        # print(f"use_timestep_embedding: {self.use_timestep_embedding}")
+        if self.use_timestep_embedding:
+            self.embed_timestep = nn.Embedding(sequence_length, hidden_size)
+
+        # Latent Motion Positional Embeddings
+        self.use_latent_motion_pos_embedding = use_latent_motion_pos_embedding
+        # print(f"use_latent_motion_pos_embedding: {self.use_latent_motion_pos_embedding}")
+        if self.use_latent_motion_pos_embedding:
+            self.embed_latent_motion_pos = nn.Embedding(per_latent_motion_len+1, hidden_size)
+
         # Layer norm
         self.embed_ln = nn.LayerNorm(hidden_size)
 
@@ -110,7 +125,13 @@ class MotoGPT(nn.Module):
         self.pred_act_mlps = nn.ModuleList([
             nn.Linear(hidden_size, hidden_size//2),
             nn.Linear(hidden_size//2, hidden_size//2)])
-        self.pred_arm_act = nn.Linear(hidden_size//2, self.act_dim-1) # arm action
+
+        self.pred_discrete_arm_action = pred_discrete_arm_action # NOTE 2024/12/17
+        if self.pred_discrete_arm_action:
+            self.pred_arm_act = nn.Linear(hidden_size//2, (self.act_dim-1)*3) # NOTE 2024/12/17: discrete arm action, [0:-0.01, 1:0, 2:+0.01]
+        else:
+            self.pred_arm_act = nn.Linear(hidden_size//2, self.act_dim-1) # arm action
+
         self.pred_gripper_act = nn.Linear(hidden_size//2, 1) # gripper action
         
     @property
@@ -181,7 +202,11 @@ class MotoGPT(nn.Module):
             latent_motion_queries = self.latent_motion_queries.weight  # (1, h)
             latent_motion_queries = latent_motion_queries.view(1, 1, 1, self.hidden_size).repeat(batch_size, sequence_length, 1, 1)  # (b, t, 1, h)
             latent_motion_embeddings = self.embed_latent_motion(latent_motion_ids) # (b, t, per_latent_motion_len, h)
-            act_stacked_inputs = torch.cat((latent_motion_queries, latent_motion_embeddings), dim=2)  # (b, t, n_tokens, h)
+            act_stacked_inputs = torch.cat((latent_motion_queries, latent_motion_embeddings), dim=2)  # (b, t, per_latent_motion_len+1, h)
+
+            if self.use_latent_motion_pos_embedding:
+                latent_motion_pos_embeddings = self.embed_latent_motion_pos.weight # (per_latent_motion_len+1, h)
+                act_stacked_inputs = act_stacked_inputs + latent_motion_pos_embeddings
         else:
             act_stacked_inputs = torch.tensor([]).to(rgb.device)
 
@@ -190,7 +215,10 @@ class MotoGPT(nn.Module):
             action_chunk_queries = action_chunk_queries.view(1, sequence_length, self.chunk_size, self.hidden_size).repeat(batch_size, 1, 1, 1)  # (b, t, chunk_size, h)
             act_stacked_inputs = torch.cat((act_stacked_inputs, action_chunk_queries), dim=2)  # (b, t, n_tokens, h)
 
-        
+        if self.use_timestep_embedding:
+            time_embeddings = self.embed_timestep.weight.unsqueeze(1) # (t, 1, h)
+            act_stacked_inputs = act_stacked_inputs + time_embeddings
+
         # Number of tokens
         n_lang_tokens = lang_embeddings.shape[1]
         n_patch_tokens = patch_embeddings.shape[1]
@@ -295,6 +323,8 @@ class MotoGPT(nn.Module):
             for pred_act_mlp in self.pred_act_mlps:
                 action_embedding = pred_act_mlp(action_embedding)
             arm_action_preds = self.pred_arm_act(action_embedding)  # (b, t, chunk_size, act_dim - 1)
+            if self.pred_discrete_arm_action:
+                arm_action_preds = arm_action_preds.reshape(*arm_action_preds.shape[:-1], -1, 3) # NOTE 2024/12/17: (b, t, chunk_size, act_dim - 1, 3)
             gripper_action_preds = self.pred_gripper_act(action_embedding)  # (b, t, chunk_size, 1)
             
         prediction = {
@@ -358,6 +388,17 @@ class MotoGPT(nn.Module):
             probs = F.softmax(logits, dim=-1) # (b, t, latent_motion_codebook_size) or (b, latent_motion_codebook_size)
             cur_pred_latent_motion_ids = torch.argmax(probs, dim=-1) # (b, t) or (b,)
             cur_pred_latent_motion_embeddings = self.embed_latent_motion(cur_pred_latent_motion_ids) # (b, t, h) or  # (b, h)
+
+            if self.use_latent_motion_pos_embedding:
+                cur_latent_motion_pos_embedding = self.embed_latent_motion_pos.weight[j+1] # (h,)
+                cur_pred_latent_motion_embeddings += cur_latent_motion_pos_embedding
+
+            if self.use_timestep_embedding:
+                if parallel:
+                    cur_time_embeddings = self.embed_timestep.weight # (t, h)
+                else:
+                    cur_time_embeddings = self.embed_timestep.weight[buffer_len-1] # (h,)
+                cur_pred_latent_motion_embeddings += cur_time_embeddings
 
             cur_pred_latent_motion_inputs = self.embed_ln(cur_pred_latent_motion_embeddings) # (b, t, h) or (b, h)
             act_stacked_inputs = act_stacked_inputs.reshape(batch_size, sequence_length, n_tokens, self.hidden_size)
@@ -449,6 +490,15 @@ class MotoGPT(nn.Module):
                 stacked_attention_mask = stacked_attention_mask.gather(1, prev_beam_indices.unsqueeze(2).unsqueeze(3).unsqueeze(4).expand(-1, -1, -1, n_cond_tokens+sequence_length*n_tokens, n_cond_tokens+sequence_length*n_tokens))
 
             cur_pred_latent_motion_embeddings = self.embed_latent_motion(latent_motion_id_preds[:, :, j])  # (b, beam_size, h)
+
+            if self.use_latent_motion_pos_embedding:
+                cur_latent_motion_pos_embedding = self.embed_latent_motion_pos.weight[j+1] # (h,)
+                cur_pred_latent_motion_embeddings += cur_latent_motion_pos_embedding
+
+            if self.use_timestep_embedding:
+                cur_time_embeddings = self.embed_timestep.weight[buffer_len-1] # (h,)
+                cur_pred_latent_motion_embeddings += cur_time_embeddings
+                
             cur_pred_latent_motion_inputs = self.embed_ln(cur_pred_latent_motion_embeddings)  # (b, beam_size, h)
             act_stacked_inputs = act_stacked_inputs.clone()
             act_stacked_inputs[:, :, buffer_len-1, latent_motion_query_token_start_i+j+1] = cur_pred_latent_motion_inputs
