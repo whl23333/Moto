@@ -62,15 +62,6 @@ BASE_STEPSIZE = {
     'berkeley_gnm_cory_hall': 5,
     'berkeley_gnm_sac_son': 10,
     'robot_vqa': 10,
-
-    'anon_robovqa': 10,
-    'SSV2': 6,  # no groundtruth value
-    'pick_place_banana_dataset': 10,  # no groundtruth value
-    'unassembly_dataset': 10,  # no groundtruth value
-    'laptop_dataset': 10,  # no groundtruth value
-
-    'SSV2_filtered': 6,  # no groundtruth value
-    'fractal20220817_data': 3,  # no groundtruth value
 }
 
 

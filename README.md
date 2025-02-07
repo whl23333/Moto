@@ -232,7 +232,7 @@ tail -f pretrain_moto_gpt_on_oxe.log
 
 ### Stage-3: Fine-tuning Moto-GPT
 #### Fine-tuning on CALVIN dataset
-- Modify the `lmdb_dir` fields in [moto_gpt/configs/data/calvin.yaml](moto_gpt/configs/data/calvin.yaml)
+- Modify the `lmdb_dir` field in [moto_gpt/configs/data/calvin.yaml](moto_gpt/configs/data/calvin.yaml)
 
 - Config the paths in [moto_gpt/configs/train/data_calvin-model_actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5-train_lr0.0002_bs512-aug_shiftTrue_resizedCropFalse-resume_from_predLatentOnly_calvin_Epoch10.yaml](moto_gpt/configs/train/data_calvin-model_actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5-train_lr0.0002_bs512-aug_shiftTrue_resizedCropFalse-resume_from_predLatentOnly_calvin_Epoch10.yaml)
 
