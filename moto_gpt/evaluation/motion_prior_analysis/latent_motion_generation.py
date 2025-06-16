@@ -102,7 +102,8 @@ def inference(
         delta_t,
         moto_gpt_seq_len,
         input_dir, 
-        output_dir
+        output_dir,
+        paired_loss=False,
     ):
 
     device = moto_gpt.device
@@ -129,12 +130,20 @@ def inference(
         initial_frame = frames[0]
         subsequent_frames = frames[1:]
         exact_num_gen_frames = subsequent_frames.shape[0]
-
-        gt_latent_motion_ids = latent_motion_tokenizer(
-            cond_pixel_values=frames[:-1],
-            target_pixel_values=frames[1:],
-            return_motion_token_ids_only=True
-        )
+        if paired_loss:
+            gt_latent_motion_ids = latent_motion_tokenizer(
+                cond_pixel_values1=frames[:-1],
+                target_pixel_values1=frames[1:],
+                cond_pixel_values2=frames[:-1],
+                target_pixel_values2=frames[1:],
+                return_motion_token_ids_only=True
+            )
+        else:
+            gt_latent_motion_ids = latent_motion_tokenizer(
+                cond_pixel_values=frames[:-1],
+                target_pixel_values=frames[1:],
+                return_motion_token_ids_only=True
+            )
 
         recons_subsequent_frames = latent_motion_tokenizer.decode_image(
             cond_pixel_values=frames[:-1],
@@ -279,7 +288,8 @@ def main(args):
         delta_t=args.delta_t,
         moto_gpt_seq_len=moto_gpt_config['sequence_length'],
         input_dir=args.input_dir, 
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        paired_loss=args.paired_loss,
     )
 
 
@@ -291,6 +301,7 @@ if __name__ == '__main__':
     parser.add_argument('--delta_t', type=int, required=True)
     parser.add_argument('--input_dir', type=str, required=True)
     parser.add_argument('--output_dir', type=str, required=True)
+    parser.add_argument('--paired_loss', type=bool, default=False)
     
     args = parser.parse_args()
     main(args)

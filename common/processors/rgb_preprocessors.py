@@ -47,7 +47,8 @@ class RGB_PreProcessor(torch.nn.Module):
             do_random_shift=False,
             crop_area_scale=(0.8, 1.0),
             crop_aspect_ratio=(3.0 / 4.0, 4.0 / 3.0),
-            shift_pad=10
+            shift_pad=10,
+            use_original_rgb=True
         ):
         super().__init__()
         self.rgb_shape = rgb_shape
@@ -55,6 +56,7 @@ class RGB_PreProcessor(torch.nn.Module):
         self.register_buffer('rgb_std', torch.tensor(rgb_std).view(-1, 1, 1))
         self.do_random_resized_crop = do_random_resized_crop
         self.do_random_shift= do_random_shift
+        self.use_original_rgb = use_original_rgb
 
         self.eval_transforms = torch.nn.Sequential(
             Resize(rgb_shape, interpolation=InterpolationMode.BICUBIC, antialias=True)
@@ -74,7 +76,8 @@ class RGB_PreProcessor(torch.nn.Module):
         
 
     def forward(self, x, train=False):
-        x = x.float()*(1/255.)
+        if self.use_original_rgb:
+            x = x.float()*(1/255.)
         if train:
             x = self.train_transforms(x)
         else:

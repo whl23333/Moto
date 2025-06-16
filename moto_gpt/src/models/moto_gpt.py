@@ -44,9 +44,11 @@ class MotoGPT(nn.Module):
             pred_discrete_arm_action=False, # NOTE 2024/12/17: predict discrete arm actions for berkeley_fanuc_manipulation
             use_timestep_embedding=False,
             use_latent_motion_pos_embedding=False,
+            lang_embed_dim=None,
             **kwargs
     ):
         super().__init__()
+        self.lang_embed_dim = lang_embed_dim
         self.act_dim = act_dim
         self.sequence_length = sequence_length
         self.chunk_size = chunk_size
@@ -84,7 +86,10 @@ class MotoGPT(nn.Module):
         self.embed_condition = nn.Embedding(1, hidden_size)
 
         # Embedding function for languages
-        self.embed_lang = torch.nn.Linear(self.lang_feat_dim, hidden_size)
+        if self.lang_embed_dim is None:
+            self.embed_lang = torch.nn.Linear(self.lang_feat_dim, hidden_size)
+        else:
+            self.embed_lang = torch.nn.Linear(self.lang_embed_dim, hidden_size)
 
         # Embedding function for vision
         self.embed_img = torch.nn.Linear(self.img_feat_dim, hidden_size)
@@ -163,12 +168,15 @@ class MotoGPT(nn.Module):
         
 
         # Embed language
-        if self.freeze_lang:
-            with torch.no_grad():
+        if self.lang_embed_dim is None:
+            if self.freeze_lang:
+                with torch.no_grad():
+                    lang_embeddings = self.model_lang(input_ids=language, attention_mask=lang_attention_mask).last_hidden_state
+            else:
                 lang_embeddings = self.model_lang(input_ids=language, attention_mask=lang_attention_mask).last_hidden_state
+            lang_embeddings = self.embed_lang(lang_embeddings.float())  # (b, n_lang_tokens, h)
         else:
-            lang_embeddings = self.model_lang(input_ids=language, attention_mask=lang_attention_mask).last_hidden_state
-        lang_embeddings = self.embed_lang(lang_embeddings.float())  # (b, n_lang_tokens, h)
+            lang_embeddings = self.embed_lang(language)  # (b, n_lang_tokens, h)
 
         # Get obs and patch feature from Visual Encoder
         if self.freeze_vision:

@@ -14,6 +14,19 @@ import random
 import json
 from PIL import Image
 import random
+import pandas as pd
+from glob import glob
+from torchvision import transforms
+from pathlib import Path
+from collections import defaultdict, Counter
+import itertools
+import pickle
+import blosc
+from scipy.interpolate import CubicSpline, interp1d
+import torchvision.transforms.functional as transforms_f
+import einops
+def normalise_quat(x: torch.Tensor):
+    return x / torch.clamp(x.square().sum(dim=-1).sqrt().unsqueeze(-1), min=1e-10)
 
 def get_split_and_ratio(split, splits):
     assert split in ['train', 'val']
@@ -460,10 +473,10 @@ class JsonDataset_for_MotoGPT_Video(Dataset):
 
 class NpzDataset_for_MotoGPT_Video(Dataset):
     def __init__(
-        self, split, skip_frame, 
-        sequence_length,
-        npz_dir=None, rgb_shape=(224, 224), 
-        rgb_preprocessor=None, max_skip_frame=None, npz_metadata_path=None, *args, **kwargs):
+        self, split, skip_frame, # split: train/val, skip_frame: 5
+        sequence_length, # 1
+        npz_dir=None, rgb_shape=(224, 224), # npz_dir: "/group/ycyang/yyang-infobai/task_ABC_D/", rgb_shape: [200, 200]
+        rgb_preprocessor=None, max_skip_frame=None, npz_metadata_path=None, *args, **kwargs): # 'do_extract_future_frames': True, 'do_extract_action': False
 
         super().__init__()
 
@@ -574,3 +587,744 @@ class NpzDataset_for_MotoGPT_Video(Dataset):
 
     def __len__(self):
         return self.dataset_len
+
+class NpzDataset_for_MotoGPT_Video_Multiview(Dataset):
+    def __init__(
+        self, split, skip_frame, # split: train/val, skip_frame: 5
+        sequence_length, # 1
+        npz_dir=None, rgb_shape_static=(224, 224), rgb_shape_gripper=(224, 224), # npz_dir: "/group/ycyang/yyang-infobai/task_ABC_D/", rgb_shape: [200, 200]
+        rgb_preprocessor=None, max_skip_frame=None, npz_metadata_path=None, *args, **kwargs): # 'do_extract_future_frames': True, 'do_extract_action': False
+
+        super().__init__()
+
+        self.sequence_length = sequence_length
+        self.skip_frame = skip_frame
+        self.max_skip_frame = max_skip_frame
+        self.dummy_rgb_initial_static = torch.zeros(1, 3, rgb_shape_static[0], rgb_shape_static[1], dtype=torch.uint8)
+        self.dummy_rgb_future_static = torch.zeros(sequence_length, 3, rgb_shape_static[0], rgb_shape_static[1], dtype=torch.uint8)
+        self.dummy_rgb_initial_gripper = torch.zeros(1, 3, rgb_shape_gripper[0], rgb_shape_gripper[1], dtype=torch.uint8)
+        self.dummy_rgb_future_gripper = torch.zeros(sequence_length, 3, rgb_shape_gripper[0], rgb_shape_gripper[1], dtype=torch.uint8)
+        self.dummy_latent_mask = torch.zeros(sequence_length)
+
+        if split == 'train':
+            split = 'training'
+        elif split == 'val':
+            split = 'validation'
+        else:
+            raise NotImplementedError
+
+        self.npz_dir = os.path.join(npz_dir, split)
+        self.rgb_preprocessor = rgb_preprocessor
+
+        if npz_metadata_path is None:
+            npz_metadata_path = os.path.join(self.npz_dir, 'npz_metadata.json')
+        else:
+            print(f"specified npz_metadata_path: {npz_metadata_path}")
+        
+        with open(npz_metadata_path) as f:
+            npz_metadata = json.load(f)
+
+        self.npz_metadata = npz_metadata
+        self.dataset_len = len(npz_metadata) - skip_frame
+
+    def get_npz_path(self, npz_basename):
+        return os.path.join(self.npz_dir, npz_basename)
+
+    def extract_frames(self, npz_basename, delta_t, 
+                       rgb_initial_static, rgb_initial_gripper, rgb_future_static, rgb_future_gripper, latent_mask):
+        
+        def _extract_frame(npz_idx):
+            npz_path = self.get_npz_path(f"episode_{str(npz_idx).zfill(7)}.npz")
+            try:
+                frame_static = Image.fromarray(np.load(npz_path)['rgb_static']).convert("RGB")
+                frame_gripper = Image.fromarray(np.load(npz_path)['rgb_gripper']).convert("RGB")
+            except Exception as e:
+                raise e
+
+            frame_static = np.array(frame_static)
+            frame_gripper = np.array(frame_gripper)
+            frame_static = torch.from_numpy(rearrange(frame_static, 'h w c -> c h w'))
+            frame_gripper = torch.from_numpy(rearrange(frame_gripper, 'h w c -> c h w'))
+            if self.rgb_preprocessor is not None:
+                frame_static  = self.rgb_preprocessor(frame_static)
+                frame_gripper  = self.rgb_preprocessor(frame_gripper)
+            return frame_static, frame_gripper
+
+        start_npz_path = self.get_npz_path(npz_basename)
+        start_npz_idx = int(npz_basename.split("_")[-1].split(".")[0])
+        rgb_initial_static[0], rgb_initial_gripper[0] = _extract_frame(start_npz_idx)
+
+        for i in range(self.sequence_length):
+            next_npz_idx = start_npz_idx+(i+1)*delta_t
+            try:
+                rgb_future_static[i], rgb_future_gripper[i] = _extract_frame(next_npz_idx)
+                latent_mask[i] = 1
+            except:
+                break
+
+    
+    def obtain_item(self, idx, delta_t=None):
+        npz_basename = self.npz_metadata[idx]
+        npz_idx = int(npz_basename.split("_")[-1].split(".")[0])
+
+        if delta_t is None:
+            if self.max_skip_frame is None:
+                delta_t = self.skip_frame
+            else:
+                delta_t = random.randint(self.skip_frame, self.max_skip_frame)
+
+        # dummy features
+        rgb_initial_static = self.dummy_rgb_initial_static.clone()
+        rgb_future_static = self.dummy_rgb_future_static.clone()
+        rgb_initial_gripper = self.dummy_rgb_initial_gripper.clone()
+        rgb_future_gripper = self.dummy_rgb_future_gripper.clone()
+        latent_mask = self.dummy_latent_mask.clone()
+
+        # extract initial frame and future frames
+        self.extract_frames(
+            npz_basename=npz_basename,
+            delta_t=delta_t,
+            rgb_initial_static=rgb_initial_static,
+            rgb_initial_gripper=rgb_initial_gripper,
+            rgb_future_static=rgb_future_static,
+            rgb_future_gripper=rgb_future_gripper,
+            latent_mask=latent_mask
+        )
+
+        if latent_mask.sum() == 0:
+            raise Exception("latent_mask should be larger than zero!")
+
+        return {
+            "rgb_initial_static": rgb_initial_static,
+            "rgb_future_static": rgb_future_static,
+            "rgb_initial_gripper": rgb_initial_gripper,
+            "rgb_future_gripper": rgb_future_gripper,
+            "latent_mask": latent_mask,
+            "idx": idx,
+            "delta_t": delta_t,
+        }
+
+    
+    def __getitem__(self, idx):
+        while True:
+            try:
+                return self.obtain_item(idx)
+            except Exception as e:
+                idx = random.randint(0, len(self)-1)
+            
+
+    def __len__(self):
+        return self.dataset_len
+
+class MetaworldMultiView(Dataset):
+    def __init__(self, path="../datasets/valid", sample_per_seq=7, target_size=(128, 128), frameskip=None, randomcrop=False, use_video = False):
+        print("Preparing dataset...")
+        self.sample_per_seq = sample_per_seq
+        self.use_video = use_video
+        self.frame_skip = frameskip
+        task_dirs = glob(f"{path}/**/metaworld_dataset/*/", recursive=True)
+        self.tasks = []
+        self.sequences = []
+        self.actions = []
+        
+        for task_dir in task_dirs:
+            corner_num=len(glob(f"{task_dir}/*", recursive=True))
+            video_num=len(glob(f"{task_dir}/*/*", recursive=True))
+            sequence_num=video_num//corner_num
+            for i in range(sequence_num):
+                seq_dirs = glob(f"{task_dir}/*/{i:03}/")
+                seqs = []
+                for seq_dir in seq_dirs:
+                    seq = sorted(glob(f"{seq_dir}*.png"), key=lambda x: int(x.split("/")[-1].rstrip(".png")))
+                    seqs.append(seq)
+                self.sequences.append(seqs)
+                self.tasks.append(task_dir.split("/")[-2].replace("-", " "))
+                action_dir = f"{task_dir}/corner/{i:03}/action.pkl"
+                actions = pd.read_pickle(action_dir)
+                action = actions[i]
+                if len(action) != len(seqs[0]):
+                    action.append(np.array([0.0, 0.0, 0.0, action[len(action)-1][3]]))
+                self.actions.append(action)
+                  
+        # if randomcrop:
+        #     self.transform = video_transforms.Compose([
+        #         video_transforms.CenterCrop((160, 160)),
+        #         video_transforms.RandomCrop((128, 128)),
+        #         video_transforms.Resize(target_size),
+        #         volume_transforms.ClipToTensor()
+        #     ])
+        # else:
+        #     self.transform = video_transforms.Compose([
+        #         video_transforms.CenterCrop((128, 128)),
+        #         video_transforms.Resize(target_size),
+        #         volume_transforms.ClipToTensor()
+        #     ])
+        print("Done")
+
+    def get_samples(self, idx):
+        seq = self.sequences[idx]
+        action = self.actions[idx]
+        # if frameskip is not given, do uniform sampling betweeen a random frame and the last frame
+        if self.frame_skip is None:
+            start_idx = random.randint(0, len(seq[0])-1)
+            for i in range(len(seq)):
+                seq[i] = seq[i][start_idx:]
+            action = action[start_idx:]
+            N = len(seq[0])
+            samples = []
+            for i in range(self.sample_per_seq-1):
+                samples.append(int(i*(N-1)/(self.sample_per_seq-1)))
+            samples.append(N-1)
+        else:
+            N = len(seq[0])
+            start_idx = random.randint(0, len(seq[0])-self.frame_skip*self.sample_per_seq)
+            samples = [i if i < len(seq[0]) else -1 for i in range(start_idx, start_idx+self.frame_skip*self.sample_per_seq, self.frame_skip)]
+        for i in range(len(seq)):
+            seq[i] = [seq[i][j] for j in samples]
+        action_sample_seq = []
+        if self.frame_skip is None:
+            if N < self.sample_per_seq:
+                for i in range(self.sample_per_seq-1):
+                    if samples[i] < samples [i+1]:
+                        action_sample_seq.append(action[samples[i]])
+                    else:
+                        action_sample_seq.append(np.array([0.0, 0.0, 0.0, action[samples[i]][3]]))
+            else:
+                for i in range(self.sample_per_seq-1):
+                    a = np.add.reduce(action[samples[i]:samples[i+1]])
+                    a[3] = action[samples[i+1]-1][3]
+                    action_sample_seq.append(a)
+        
+        else:
+            for i in range(self.sample_per_seq-1):
+                if samples[i]!=samples[i+1] and samples[i]<N-1:
+                    a = np.add.reduce(action[samples[i]:samples[i+1]])
+                    a[3] = action[samples[i+1]-1][3]
+                    action_sample_seq.append(a)                    
+                else:
+                    action_sample_seq.append(np.array([0.0, 0.0, 0.0, action[samples[i]][3]]))   
+        return seq, action_sample_seq
+    
+    def __len__(self):
+        return len(self.sequences)
+    
+    def __getitem__(self, idx):
+        try:
+            samples, actions = self.get_samples(idx)
+            actions = np.array(actions)
+            actions = torch.tensor(actions)
+            all_x = []
+            all_x_cond = []
+            for i in range(len(samples)):
+                # images = self.transform([Image.open(s) for s in samples[i]])
+                images = [Image.open(s) for s in samples[i]]
+                images = [np.array(img) for img in images]
+                images = [torch.from_numpy(img).permute(2, 0, 1) for img in images]
+                images = torch.stack(images, dim=0)
+                images = rearrange(images, "f c h w -> c f h w")
+                x_cond = images[:, 0] # first frame
+                x = rearrange(images[:, 1:], "c f h w -> (f c) h w") # all other frames
+                all_x.append(x)
+                all_x_cond.append(x_cond)
+            task = self.tasks[idx]
+            if self.use_video:
+                return torch.stack(all_x, dim=0), torch.stack(all_x_cond, dim=0), task, actions
+            else:
+                x = torch.stack(all_x, dim=0) # [corner (f c) h w]
+                x_cond = torch.stack(all_x_cond, dim=0) # [corner c h w]
+                x = rearrange(x, "v (f c) h w -> v f c h w", f=self.sample_per_seq-1, c=len(samples))
+                x_target = x[:, -1] # [corner c h w], last frame
+                return x_target, x_cond, task, actions
+        except Exception as e:
+            print(e)
+            # return self.__getitem__(idx + 1 % self.__len__()) 
+
+
+def loader(file):
+    if str(file).endswith(".npy"):
+        try:
+            content = np.load(file, allow_pickle=True)
+            return content
+        except UnpicklingError as e:
+            print(f"Can't load {file}: {e}")
+    elif str(file).endswith(".dat"):
+        try:
+            with open(file, "rb") as f:
+                content = pickle.loads(blosc.decompress(f.read()))
+            return content
+        except UnpicklingError as e:
+            print(f"Can't load {file}: {e}")
+    elif str(file).endswith(".pkl"):
+        try:
+            with open(file, 'rb') as f:
+                content = pickle.load(f)
+            return content
+        except UnpicklingError as e:
+            print(f"Can't load {file}: {e}")
+    return None
+
+
+class Resize:
+    """Resize and pad/crop the image and aligned point cloud."""
+
+    def __init__(self, scales):
+        self.scales = scales
+
+    def __call__(self, **kwargs):
+        """Accept tensors as T, N, C, H, W."""
+        keys = list(kwargs.keys())
+
+        if len(keys) == 0:
+            raise RuntimeError("No args")
+
+        # Sample resize scale from continuous range
+        sc = np.random.uniform(*self.scales)
+
+        t, n, c, raw_h, raw_w = kwargs[keys[0]].shape
+        kwargs = {n: arg.flatten(0, 1) for n, arg in kwargs.items()}
+        resized_size = [int(raw_h * sc), int(raw_w * sc)]
+
+        # Resize
+        kwargs = {
+            n: transforms_f.resize(
+                arg,
+                resized_size,
+                transforms.InterpolationMode.NEAREST
+            )
+            for n, arg in kwargs.items()
+        }
+
+        # If resized image is smaller than original, pad it with a reflection
+        if raw_h > resized_size[0] or raw_w > resized_size[1]:
+            right_pad, bottom_pad = max(raw_w - resized_size[1], 0), max(
+                raw_h - resized_size[0], 0
+            )
+            kwargs = {
+                n: transforms_f.pad(
+                    arg,
+                    padding=[0, 0, right_pad, bottom_pad],
+                    padding_mode="reflect",
+                )
+                for n, arg in kwargs.items()
+            }
+
+        # If resized image is larger than original, crop it
+        i, j, h, w = transforms.RandomCrop.get_params(
+            kwargs[keys[0]], output_size=(raw_h, raw_w)
+        )
+        kwargs = {
+            n: transforms_f.crop(arg, i, j, h, w) for n, arg in kwargs.items()
+        }
+
+        kwargs = {
+            n: einops.rearrange(arg, "(t n) c h w -> t n c h w", t=t)
+            for n, arg in kwargs.items()
+        }
+
+        return kwargs
+
+
+class TrajectoryInterpolator:
+    """Interpolate a trajectory to have fixed length."""
+
+    def __init__(self, use=False, interpolation_length=50):
+        self._use = use
+        self._interpolation_length = interpolation_length
+
+    def __call__(self, trajectory):
+        if not self._use:
+            return trajectory
+        trajectory = trajectory.numpy()
+        # Calculate the current number of steps
+        old_num_steps = len(trajectory)
+
+        # Create a 1D array for the old and new steps
+        old_steps = np.linspace(0, 1, old_num_steps)
+        new_steps = np.linspace(0, 1, self._interpolation_length)
+
+        # Interpolate each dimension separately
+        resampled = np.empty((self._interpolation_length, trajectory.shape[1]))
+        for i in range(trajectory.shape[1]):
+            if i == (trajectory.shape[1] - 1):  # gripper opening
+                interpolator = interp1d(old_steps, trajectory[:, i])
+            else:
+                interpolator = CubicSpline(old_steps, trajectory[:, i])
+
+            resampled[:, i] = interpolator(new_steps)
+
+        resampled = torch.tensor(resampled)
+        if trajectory.shape[1] == 8:
+            resampled[:, 3:7] = normalise_quat(resampled[:, 3:7])
+        return resampled
+
+
+
+class MetaworldDataset(Dataset):
+    def __init__(self, path="../datasets/valid", sample_per_seq=8, target_size=(128, 128), frameskip=1, randomcrop=False):
+        print("Preparing dataset...")
+        # self.sample_per_seq = sample_per_seq
+        self.sample_per_seq = sample_per_seq
+        self.frame_skip = frameskip
+
+        sequence_dirs = glob(f"{path}/**/metaworld_dataset/*/*/*/", recursive=True)
+        self.tasks = []
+        self.sequences = []
+        self.actions = []
+        for seq_dir in sequence_dirs:
+            task = seq_dir.split("/")[-4] # "assembly"
+            seq_id= int(seq_dir.split("/")[-2]) # 0
+            # if task not in included_tasks or seq_id not in included_idx:
+            #     continue
+            seq = sorted(glob(f"{seq_dir}*.png"), key=lambda x: int(x.split("/")[-1].rstrip(".png")))
+            action = pd.read_pickle(os.path.join(seq_dir, "action.pkl"))
+            action = action[seq_id]
+            if len(action) != len(seq):
+                action.append(np.array([0.0, 0.0, 0.0, action[len(action)-1][3]]))
+            
+            self.sequences.append(seq)
+            self.tasks.append(seq_dir.split("/")[-4].replace("-", " "))
+            self.actions.append(action)
+    
+        # if randomcrop:
+        #     self.transform = video_transforms.Compose([
+        #         video_transforms.CenterCrop((160, 160)),
+        #         video_transforms.RandomCrop((128, 128)),
+        #         video_transforms.Resize(target_size),
+        #         volume_transforms.ClipToTensor()
+        #     ])
+        # else:
+        #     self.transform = video_transforms.Compose([
+        #         video_transforms.CenterCrop((128, 128)),
+        #         video_transforms.Resize(target_size),
+        #         volume_transforms.ClipToTensor()
+        #     ])
+        print("Done")
+
+    def get_samples(self, idx):
+        seq = self.sequences[idx] # 取某一个目录下的所有图片
+        action = self.actions[idx]
+        # if frameskip is not given, do uniform sampling betweeen a random frame and the last frame
+        if self.frame_skip is None: #随机顺序选取某一个任务下的8张图片，8张图片之间不一定紧挨着对方
+            start_idx = random.randint(0, len(seq)-self.sample_per_seq)
+            seq = seq[start_idx:]
+            action = action[start_idx:]
+            N = len(seq)
+            samples = []
+            for i in range(self.sample_per_seq-1):
+                samples.append(int(i*(N-1)/(self.sample_per_seq-1)))
+            samples.append(N-1)
+        else:
+            N=len(seq)
+            start_idx = random.randint(0, len(seq)-self.sample_per_seq*self.frame_skip)
+            samples = [i if i < len(seq) else -1 for i in range(start_idx, start_idx+self.frame_skip*self.sample_per_seq, self.frame_skip)]
+        
+        action_sample_seq = []
+        if self.frame_skip is None:
+            if N < self.sample_per_seq:
+                for i in range(self.sample_per_seq-1):
+                    if samples[i] < samples [i+1]:
+                        action_sample_seq.append(action[samples[i]])
+                    else:
+                        action_sample_seq.append(np.array([0.0, 0.0, 0.0, action[samples[i]][3]]))
+            else:
+                for i in range(self.sample_per_seq-1):
+                    a = np.add.reduce(action[samples[i]:samples[i+1]])
+                    a[3] = action[samples[i+1]-1][3]
+                    action_sample_seq.append(a)
+        
+        else:
+            for i in range(self.sample_per_seq-1):
+                if samples[i]!=samples[i+1] and samples[i]<N-1:
+                    a = np.add.reduce(action[samples[i]:samples[i+1]])
+                    a[3] = action[samples[i+1]-1][3]
+                    action_sample_seq.append(a)                    
+                else:
+                    action_sample_seq.append(np.array([0.0, 0.0, 0.0, action[samples[i]][3]]))
+        
+        return [seq[i] for i in samples], action_sample_seq
+    
+    def __len__(self):
+        return len(self.sequences) # 一共有多少种任务
+    
+    def __getitem__(self, idx):
+        try:
+            samples, actions = self.get_samples(idx)
+            actions = np.array(actions)
+            actions = torch.tensor(actions)
+            action_arm = actions[:, :3]
+            action_arm = action_arm.unsqueeze(0) # shape: [1 self.sample_per_seq-1 3]
+            
+            action_gripper = actions[:, 3] # shape: [self.sample_per_seq-1]
+            action_gripper = action_gripper.unsqueeze(1) # shape: [self.sample_per_seq-1 1]
+            action_gripper = action_gripper.unsqueeze(0) # shape: [1 self.sample_per_seq-1 1]
+            images = [Image.open(s) for s in samples]
+            images_np = [np.array(img) for img in images]
+            images = [torch.from_numpy(img).permute(2, 0, 1) for img in images_np]
+            images = torch.stack(images, dim=0) # [f c h w]
+            rgb_initial = images[0].unsqueeze(0) # [1 c h w]
+            rgb_future = images[-1].unsqueeze(0) # [1 c h w]
+            
+            # # images = self.transform([Image.open(s) for s in samples]) # [c f h w]
+            # x_cond = images[:, 0] # first frame 选取8张图片中的第一张作为条件
+            # x = rearrange(images[:, 1:], "c f h w -> (f c) h w") # all other frames
+            task = self.tasks[idx]
+            mask = torch.ones(1)
+            return rgb_initial, rgb_future, task, action_arm, action_gripper, mask # [1 c h w], [1 c h w], str, [1 self.sampler_per_seq-1 3], [1 self.sample_per_seq-1 1], [1]
+        except Exception as e:
+            print(e)
+            # return self.__getitem__(idx + 1 % self.__len__())    
+            
+
+class RLBenchDataset_Moto(Dataset):
+    """RLBench dataset."""
+
+    def __init__(
+        self,
+        # required
+        root,
+        instructions=None,
+        # dataset specification
+        taskvar=[('close_door', 0)],
+        cache_size=0,
+        max_episodes_per_task=100, # -1
+        num_iters=None,
+        cameras=("wrist", "left_shoulder", "right_shoulder"),
+        # for augmentations
+        training=True,
+        image_rescale=(1.0, 1.0),
+        # for trajectories
+        return_low_lvl_trajectory=False,
+        dense_interpolation=False, # true
+        interpolation_length=100,
+        relative_action=False
+    ):
+        self._cache = {}
+        self._cache_size = cache_size # 600
+        self._cameras = cameras
+        self._num_iters = num_iters # 600000
+        self._training = training
+        self._taskvar = taskvar
+        self._return_low_lvl_trajectory = return_low_lvl_trajectory
+        if isinstance(root, (Path, str)):
+            root = [Path(root)]
+        self._root = [Path(r).expanduser() for r in root]
+        self._relative_action = relative_action # false
+
+        # For trajectory optimization, initialize interpolation tools
+        if return_low_lvl_trajectory: #true
+            assert dense_interpolation
+            self._interpolate_traj = TrajectoryInterpolator(
+                use=dense_interpolation,
+                interpolation_length=interpolation_length # 2
+            )
+
+        # Keep variations and useful instructions
+        self._instructions = defaultdict(dict)
+        self._num_vars = Counter()  # variations of the same task
+        for root, (task, var) in itertools.product(self._root, taskvar):
+            data_dir = root / f"{task}+{var}"
+            if data_dir.is_dir():
+                if instructions is not None:
+                    self._instructions[task][var] = instructions[task][var]
+                self._num_vars[task] += 1
+
+        # If training, initialize augmentation classes
+        if self._training:
+            self._resize = Resize(scales=image_rescale)
+
+        # File-names of episodes per task and variation
+        episodes_by_task = defaultdict(list)  # {task: [(task, var, filepath)]}
+        for root, (task, var) in itertools.product(self._root, taskvar):
+            data_dir = root / f"{task}+{var}"
+            if not data_dir.is_dir():
+                print(f"Can't find dataset folder {data_dir}")
+                continue
+            npy_episodes = [(task, var, ep) for ep in data_dir.glob("*.npy")]
+            dat_episodes = [(task, var, ep) for ep in data_dir.glob("*.dat")] #
+            pkl_episodes = [(task, var, ep) for ep in data_dir.glob("*.pkl")]
+            episodes = npy_episodes + dat_episodes + pkl_episodes
+            # Split episodes equally into task variations
+            if max_episodes_per_task > -1:
+                episodes = episodes[
+                    :max_episodes_per_task // self._num_vars[task] + 1
+                ]
+            if len(episodes) == 0:
+                print(f"Can't find episodes at folder {data_dir}")
+                continue
+            episodes_by_task[task] += episodes
+
+        # Collect and trim all episodes in the dataset
+        self._episodes = []
+        self._num_episodes = 0
+        for task, eps in episodes_by_task.items():
+            if len(eps) > max_episodes_per_task and max_episodes_per_task > -1:
+                eps = random.sample(eps, max_episodes_per_task)
+            episodes_by_task[task] = sorted(
+                eps, key=lambda t: int(str(t[2]).split('/')[-1][2:-4])
+            )
+            self._episodes += eps # [(task, var, filepath)], ep0, ep1, ...
+            self._num_episodes += len(eps)
+        print(f"Created dataset from {root} with {self._num_episodes}")
+        self._episodes_by_task = episodes_by_task
+        self.resize_transform = transforms.Resize((224, 224))
+
+    def read_from_cache(self, args):
+        if self._cache_size == 0:
+            return loader(args)
+
+        if args in self._cache:
+            return self._cache[args]
+
+        value = loader(args)
+
+        if len(self._cache) == self._cache_size:
+            key = list(self._cache.keys())[int(time()) % self._cache_size]
+            del self._cache[key]
+
+        if len(self._cache) < self._cache_size:
+            self._cache[args] = value
+
+        return value
+
+    @staticmethod
+    def _unnormalize_rgb(rgb):
+        # (from [-1, 1] to [0, 1]) to feed RGB to pre-trained backbone
+        return rgb / 2 + 0.5
+
+    def __getitem__(self, episode_id):
+        """
+        the episode item: [
+            [frame_ids],  # we use chunk and max_episode_length to index it
+            [obs_tensors],  # wrt frame_ids, (n_cam, 2, 3, 256, 256)
+                obs_tensors[i][:, 0] is RGB, obs_tensors[i][:, 1] is XYZ
+            [action_tensors],  # wrt frame_ids, (1, 8)
+            [camera_dicts],
+            [gripper_tensors],  # wrt frame_ids, (1, 8)
+            [trajectories]  # wrt frame_ids, (N_i, 8)
+        ]
+        """
+        episode_id %= self._num_episodes
+        task, variation, file = self._episodes[episode_id]
+
+        # Load episode
+        episode = self.read_from_cache(file)
+        if episode is None:
+            return None
+
+        # randomly choose two adjacent frames
+        start_id = random.randint(0, len(episode[0]) - 2)
+        
+        # chunk = random.randint(
+        #     0, math.ceil(len(episode[0]) / self._max_episode_length) - 1
+        # )
+
+        # Get frame ids for this chunk
+        frame_ids = [episode[0][start_id], episode[0][start_id + 1]]
+        
+        # frame_ids = episode[0][
+        #     chunk * self._max_episode_length:
+        #     (chunk + 1) * self._max_episode_length
+        # ]
+
+        # Get the image tensors for the frame ids we got
+        states = torch.stack([
+            episode[1][i] if isinstance(episode[1][i], torch.Tensor)
+            else torch.from_numpy(episode[1][i])
+            for i in frame_ids
+        ]) # (2, 4, 2, 3, 256, 256), (time_steps, cameras, [rgb, pcd], c, h, w)
+
+        # Camera ids
+        if episode[3]:
+            cameras = list(episode[3][0].keys())
+            assert all(c in cameras for c in self._cameras)
+            index = torch.tensor([cameras.index(c) for c in self._cameras])
+            # Re-map states based on camera ids
+            states = states[:, index]
+
+        # Split RGB and XYZ
+        rgbs = states[:, :, 0]
+        pcds = states[:, :, 1]
+        rgbs = self._unnormalize_rgb(rgbs)
+
+        # Get action tensors for respective frame ids
+        action = torch.cat([episode[2][i] for i in frame_ids])
+
+        # Sample one instruction feature
+        if self._instructions:
+            instr = random.choice(self._instructions[task][variation])
+            instr = instr[None].repeat(len(rgbs), 1, 1)
+        else:
+            instr = torch.zeros((rgbs.shape[0], 53, 512))
+
+        # Get gripper tensors for respective frame ids
+        gripper = torch.cat([episode[4][i] for i in frame_ids]) # (2, 8)
+
+        # gripper history
+        gripper_history = torch.stack([
+            torch.cat([episode[4][max(0, i-2)] for i in frame_ids]), # (2, 8)
+            torch.cat([episode[4][max(0, i-1)] for i in frame_ids]), # (2, 8)
+            gripper # (2, 8)
+        ], dim=1) # (2, 3, 8)
+
+        # Low-level trajectory
+        traj, traj_lens = None, 0
+        if self._return_low_lvl_trajectory:
+            if len(episode) > 5:
+                traj_items = [
+                    self._interpolate_traj(episode[5][i]) for i in frame_ids
+                ] # [(interpolation_length, 8), ...]
+            else:
+                traj_items = [
+                    self._interpolate_traj(
+                        torch.cat([episode[4][i], episode[2][i]], dim=0)
+                    ) for i in frame_ids
+                ]
+            max_l = max(len(item) for item in traj_items)
+            traj = torch.zeros(len(traj_items), max_l, 8)
+            traj_lens = torch.as_tensor(
+                [len(item) for item in traj_items]
+            )
+            for i, item in enumerate(traj_items):
+                traj[i, :len(item)] = item
+            traj_mask = torch.zeros(traj.shape[:-1])
+            for i, len_ in enumerate(traj_lens.long()):
+                traj_mask[i, len_:] = 1
+
+        # Augmentations
+        if self._training:
+            if traj is not None:
+                for t, tlen in enumerate(traj_lens):
+                    traj[t, tlen:] = 0
+            modals = self._resize(rgbs=rgbs, pcds=pcds)
+            rgbs = modals["rgbs"]
+            pcds = modals["pcds"]
+        f, k, c, h, w = rgbs.shape
+        rgbs = rgbs.view(f*k, c, h, w)
+        pcds = pcds.view(f*k, c, h, w)
+        rgbs = self.resize_transform(rgbs)
+        pcds = self.resize_transform(pcds)
+        rgbs = rgbs.view(f, k, c, 224, 224)
+        pcds = pcds.view(f, k, c, 224, 224)
+        ret_dict = {
+            "task": [task for _ in frame_ids],
+            "rgbs": rgbs,  # e.g. tensor (n_frames, n_cam, 3, H, W)
+            "pcds": pcds,  # e.g. tensor (n_frames, n_cam, 3, H, W)
+            "action": action,  # e.g. tensor (n_frames, 8), target pose
+            "instr": instr,  # a (n_frames, 53, 512) tensor
+            "curr_gripper": gripper, # e.g. tensor (n_frames, 8)
+            "curr_gripper_history": gripper_history # e.g. tensor (n_frames, 3, 8)
+        }
+        if self._return_low_lvl_trajectory:
+            ret_dict.update({
+                "trajectory": traj,  # e.g. tensor (n_frames, T, 8)
+                "trajectory_mask": traj_mask.bool()  # tensor (n_frames, T)
+            })
+        ret_dict.update({
+            "mask": torch.ones(f-1)
+        })
+        return ret_dict
+
+    def __len__(self):
+        if self._num_iters is not None:
+            return self._num_iters
+        return self._num_episodes

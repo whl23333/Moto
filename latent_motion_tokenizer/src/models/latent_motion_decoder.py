@@ -44,22 +44,24 @@ class LatentMotionDecoder(nn.Module):
     def forward(
         self,
         cond_input: Optional[torch.Tensor] = None,
-        latent_motion_tokens: Optional[torch.Tensor] = None
+        latent_motion_tokens: Optional[torch.Tensor] = None,
+        **kwargs
     ) -> torch.Tensor:
 
         outputs = self.transformer(
             pixel_values=cond_input,
-            latent_motion_tokens=latent_motion_tokens
+            latent_motion_tokens=latent_motion_tokens,
+            **kwargs
         )
 
         sequence_output = outputs[0]
-        sequence_output = sequence_output[:, -self.config.num_patches:]
+        sequence_output = sequence_output[:, -self.config.num_patches:] # [b 196 768]
         batch_size, sequence_length, num_channels = sequence_output.shape
 
         if not self.is_io_hidden_states:
             height = width = math.floor(sequence_length**0.5)
-            sequence_output = sequence_output.permute(0, 2, 1).contiguous().reshape(batch_size, num_channels, height, width)
+            sequence_output = sequence_output.permute(0, 2, 1).contiguous().reshape(batch_size, num_channels, height, width) # [b 768 14 14]
 
-        reconstructed_output = self.decoder(sequence_output)
+        reconstructed_output = self.decoder(sequence_output) # [b 3 224 224]
 
         return reconstructed_output

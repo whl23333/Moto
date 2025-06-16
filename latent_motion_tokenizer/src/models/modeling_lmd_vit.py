@@ -8,6 +8,7 @@ from torch import nn
 import torch
 from typing import Optional, Dict, List, Tuple, Union
 from transformers.modeling_outputs import BaseModelOutputWithPooling
+from transformers import AutoTokenizer, T5EncoderModel
 
 
 class LMDViTEmbeddings(nn.Module):
@@ -23,9 +24,9 @@ class LMDViTEmbeddings(nn.Module):
             self.patch_embeddings = ViTPatchEmbeddings(config)
 
         query_fusion_mode = getattr(config, 'query_fusion_mode', 'add')
-        assert query_fusion_mode in ['add', 'concat']
+        assert query_fusion_mode in ['add', 'concat', 'add_with_corner']
         self.query_fusion_mode = query_fusion_mode
-        self.query_pooling_layer = nn.Linear(query_num * config.hidden_size, config.hidden_size) if query_fusion_mode == 'add' else None
+        self.query_pooling_layer = nn.Linear(query_num * config.hidden_size, config.hidden_size) if query_fusion_mode == 'add' or query_fusion_mode == 'add_with_corner' else None
         # print(f"query_fusion_mode: {query_fusion_mode}")
 
         use_mask_token = getattr(config, 'use_mask_token', False)
@@ -37,14 +38,20 @@ class LMDViTEmbeddings(nn.Module):
         self.position_embeddings = nn.Parameter(torch.randn(1, seq_len, config.hidden_size))
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.config = config
+        self.lang_tokenizer=AutoTokenizer.from_pretrained('t5-base') if query_fusion_mode == 'add_with_corner' else None
+        self.lang_encoder=T5EncoderModel.from_pretrained('t5-base') if query_fusion_mode == 'add_with_corner' else None
+        self.lang_max_length = getattr(config, 'lang_max_length', 3)
+        self.lang_embedding_dim = getattr(config, 'lang_embedding_dim', 768)
+        self.lang_pooling_layer = nn.Linear(self.lang_embedding_dim*self.lang_max_length, config.hidden_size) if query_fusion_mode == 'add_with_corner' else None
 
     def forward(
         self,
         pixel_values: torch.Tensor,
         latent_motion_tokens: torch.Tensor,
+        **kwargs
     ) -> torch.Tensor:
         batch_size = pixel_values.shape[0]
-        embeddings = self.patch_embeddings(pixel_values)
+        embeddings = self.patch_embeddings(pixel_values) # [b 196 768]
 
         # insert [MASK] tokens to inputs
         if self.use_mask_token:
@@ -55,11 +62,24 @@ class LMDViTEmbeddings(nn.Module):
         if self.query_fusion_mode == 'add':
             # add the projected motion token to the embedded patch tokens
             latent_motion_tokens = latent_motion_tokens.reshape(batch_size, 1, -1)
-            latent_motion_tokens = self.query_pooling_layer(latent_motion_tokens)
+            latent_motion_tokens = self.query_pooling_layer(latent_motion_tokens) # [b 1 768]
             embeddings = embeddings + latent_motion_tokens
         elif self.query_fusion_mode == 'concat':
             # concatenate latent motion tokens with the embedded patch tokens
             embeddings = torch.cat((latent_motion_tokens, embeddings), dim=1)
+        elif self.query_fusion_mode == 'add_with_corner':
+            assert "corner" in kwargs, "corner is required for add_with_corner mode"
+            assert "bs_per_gpu" in kwargs, "bs_per_gpu is required for add_with_corner mode"
+            corner = kwargs["corner"]
+            bs_per_gpu = kwargs["bs_per_gpu"]
+            corner=[string for string in corner for _ in range(bs_per_gpu)]
+            corner = self.lang_tokenizer(corner, return_tensors='pt', padding='max_length', truncation=True, max_length=self.lang_max_length).to(pixel_values.device)
+            corner_embeddings = self.lang_encoder(**corner).last_hidden_state
+            corner_embeddings = corner_embeddings.reshape(batch_size, 1, -1)
+            corner_embeddings = self.lang_pooling_layer(corner_embeddings) # [b 1 768]
+            latent_motion_tokens = latent_motion_tokens.reshape(batch_size, 1, -1)
+            latent_motion_tokens = self.query_pooling_layer(latent_motion_tokens) # [b 1 768]
+            embeddings = embeddings + latent_motion_tokens + corner_embeddings
 
         # add positional encoding to each token
         embeddings = embeddings + self.position_embeddings
@@ -143,6 +163,7 @@ class LMDViTModel(ViTPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        **kwargs
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         r"""
         bool_masked_pos (`torch.BoolTensor` of shape `(batch_size, num_patches)`, *optional*):
@@ -174,8 +195,9 @@ class LMDViTModel(ViTPreTrainedModel):
 
         embedding_output = self.embeddings(
             pixel_values=pixel_values,
-            latent_motion_tokens=latent_motion_tokens
-        )
+            latent_motion_tokens=latent_motion_tokens,
+            **kwargs
+        ) # [b 196 768]
 
         encoder_outputs = self.encoder(
             embedding_output,
@@ -184,7 +206,7 @@ class LMDViTModel(ViTPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        sequence_output = encoder_outputs[0]
+        sequence_output = encoder_outputs[0] # [b 196 768]
         sequence_output = self.layernorm(sequence_output)
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 

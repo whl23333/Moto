@@ -8,17 +8,23 @@ pyrootutils.setup_root(__file__, indicator='.project-root', pythonpath=True, dot
 from transformers import AutoTokenizer
 from transformers.utils import FEATURE_EXTRACTOR_NAME, get_file_from_repo
 import json
-from common.data.datasets import LMDBDataset_for_MotoGPT_RT1, LMDBDataset_for_MotoGPT_OXE, LMDBDataset_for_MotoGPT_Video, LMDBDataset_Mix, JsonDataset_for_MotoGPT_Video, NpzDataset_for_MotoGPT_Video, LMDBDataset_for_MotoGPT_CALVIN
+from common.data.datasets import LMDBDataset_for_MotoGPT_RT1, LMDBDataset_for_MotoGPT_OXE, LMDBDataset_for_MotoGPT_Video, LMDBDataset_Mix, JsonDataset_for_MotoGPT_Video, NpzDataset_for_MotoGPT_Video, LMDBDataset_for_MotoGPT_CALVIN, NpzDataset_for_MotoGPT_Video_Multiview
 from common.data.mix_utils import BASE_STEPSIZE, DISPLAY_KEY
 from torchvision.transforms.v2 import Resize, InterpolationMode
 from torch.utils.data import ConcatDataset, WeightedRandomSampler
+import pickle
+from typing import Dict, Optional, Sequence
+from pathlib import Path
+import numpy as np
 
+Instructions = Dict[str, Dict[int, torch.Tensor]]
 data_type2dataset_cls = {
     'rt1': LMDBDataset_for_MotoGPT_RT1,
     'video': LMDBDataset_for_MotoGPT_Video,
     'oxe': LMDBDataset_for_MotoGPT_OXE,
     'video_json': JsonDataset_for_MotoGPT_Video,
     'video_npz': NpzDataset_for_MotoGPT_Video,
+    'video_npz_multiview': NpzDataset_for_MotoGPT_Video_Multiview,
     'calvin': LMDBDataset_for_MotoGPT_CALVIN,
 }
 
@@ -82,3 +88,42 @@ def load_dataset(data_config, extra_data_config):
         eval_dataset = dataset_cls(split='val', **data_config)
     
     return train_dataset, eval_dataset
+
+def traj_collate_fn(batch):
+    keys = [
+        "trajectory", "trajectory_mask",
+        "rgbs", "pcds",
+        "curr_gripper", "curr_gripper_history", "action", "instr",
+        "mask"
+    ]
+    ret_dict = {
+        key: torch.stack([
+            item[key].float() if key != 'trajectory_mask' else item[key]
+            for item in batch
+        ]) for key in keys
+    }
+
+    ret_dict["task"] = []
+    for item in batch:
+        ret_dict["task"].append(item["task"])
+    return ret_dict
+
+def load_instructions(
+    instructions: Optional[Path],
+    tasks: Optional[Sequence[str]] = None,
+    variations: Optional[Sequence[int]] = None,
+) -> Optional[Instructions]:
+    if instructions is not None:
+        with open(instructions, "rb") as fid:
+            data: Instructions = pickle.load(fid)
+        if tasks is not None:
+            data = {task: var_instr for task, var_instr in data.items() if task in tasks}
+        if variations is not None:
+            data = {
+                task: {
+                    var: instr for var, instr in var_instr.items() if var in variations
+                }
+                for task, var_instr in data.items()
+            }
+        return data
+    return None
