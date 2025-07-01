@@ -5,7 +5,7 @@ def main(file_path):
     with open(file_path, "r") as f:
         data = json.loads(f.read())
     data = data["null"]["task_info"]
-    output_file=f"{file_path.split('/')[-3]}.txt"
+    output_file=f"{file_path.split('/')[-4]}.txt"
     with open(output_file, "w") as f:
         for key in sorted(data.keys()):
             success_rate = data[key]["success"] / data[key]["total"]

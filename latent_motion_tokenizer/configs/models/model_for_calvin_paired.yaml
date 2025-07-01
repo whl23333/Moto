@@ -57,4 +57,4 @@ decoder:
     qkv_bias: true
     encoder_stride: 16
     num_patches: 196
-    query_fusion_mode: add_with_corner
+    # query_fusion_mode: add_with_corner

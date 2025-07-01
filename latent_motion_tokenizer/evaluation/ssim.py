@@ -31,7 +31,7 @@ class SSIM_EVAL:
         eval_dataloader,
         bs_per_gpu=32,
         paired_loss=False,
-        eval_step=1000,
+        eval_step=200,
         resume_ckpt_path=None,
         **kwargs
     ):
@@ -78,51 +78,45 @@ class SSIM_EVAL:
                 rgb_seq_static = self.rgb_preprocessor(orig_rgb_seq_static, train=True)
                 orig_rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1) # (b, 2, c, h, w)
                 rgb_seq_gripper = self.rgb_preprocessor(orig_rgb_seq_gripper, train=True)
-                if self.paired_loss:
-                    outputs_static = self.latent_motion_tokenizer(
-                        cond_pixel_values1=rgb_seq_static[:, 0],
-                        target_pixel_values1=rgb_seq_static[:, 1],
-                        cond_pixel_values2=rgb_seq_static[:, 0],
-                        target_pixel_values2=rgb_seq_static[:, 1],
-                        return_recons_only=True
-                    )
-                    outputs_gripper = self.latent_motion_tokenizer(
-                        cond_pixel_values1=rgb_seq_gripper[:, 0],
-                        target_pixel_values1=rgb_seq_gripper[:, 1],
-                        cond_pixel_values2=rgb_seq_gripper[:, 0],
-                        target_pixel_values2=rgb_seq_gripper[:, 1],
-                        return_recons_only=True
-                    )
-                    outputs_diff1 = self.latent_motion_tokenizer(
-                        cond_pixel_values1=rgb_seq_static[:, 0],
-                        target_pixel_values1=rgb_seq_static[:, 1],
-                        cond_pixel_values2=rgb_seq_gripper[:, 0],
-                        target_pixel_values2=rgb_seq_gripper[:, 1],
-                        return_recons_only=True
-                    )
-                    outputs_diff2 = self.latent_motion_tokenizer(
-                        cond_pixel_values1=rgb_seq_gripper[:, 0],
-                        target_pixel_values1=rgb_seq_gripper[:, 1],
-                        cond_pixel_values2=rgb_seq_static[:, 0],
-                        target_pixel_values2=rgb_seq_static[:, 1],
-                        return_recons_only=True
-                    )
-                    
-                else:
-                    outputs_static = self.latent_motion_tokenizer(
-                        cond_pixel_values=rgb_seq_static[:, 0],
-                        target_pixel_values=rgb_seq_static[:, 1],
-                        return_recons_only=True
-                    )
-                    outputs_gripper = self.latent_motion_tokenizer(
-                        cond_pixel_values=rgb_seq_gripper[:, 0],
-                        target_pixel_values=rgb_seq_gripper[:, 1],
-                        return_recons_only=True
-                    )
+                
+                outputs_static = self.latent_motion_tokenizer(
+                    cond_pixel_values1=rgb_seq_static[:, 0],
+                    target_pixel_values1=rgb_seq_static[:, 1],
+                    cond_pixel_values2=rgb_seq_static[:, 0],
+                    target_pixel_values2=rgb_seq_static[:, 1],
+                    return_recons_only=True,
+                    corner=['static']
+                )
+                outputs_gripper = self.latent_motion_tokenizer(
+                    cond_pixel_values1=rgb_seq_gripper[:, 0],
+                    target_pixel_values1=rgb_seq_gripper[:, 1],
+                    cond_pixel_values2=rgb_seq_gripper[:, 0],
+                    target_pixel_values2=rgb_seq_gripper[:, 1],
+                    return_recons_only=True,
+                    corner=['gripper']
+                )
+                outputs_diff1 = self.latent_motion_tokenizer(
+                    cond_pixel_values1=rgb_seq_static[:, 0],
+                    target_pixel_values1=rgb_seq_static[:, 1],
+                    cond_pixel_values2=rgb_seq_gripper[:, 0],
+                    target_pixel_values2=rgb_seq_gripper[:, 1],
+                    return_recons_only=True,
+                    corner=['gripper']
+                )
+                outputs_diff2 = self.latent_motion_tokenizer(
+                    cond_pixel_values1=rgb_seq_gripper[:, 0],
+                    target_pixel_values1=rgb_seq_gripper[:, 1],
+                    cond_pixel_values2=rgb_seq_static[:, 0],
+                    target_pixel_values2=rgb_seq_static[:, 1],
+                    return_recons_only=True,
+                    corner=['static']
+                )
                     
                     
                 recons_rgb_future_static = self.rgb_preprocessor.post_process(outputs_static["recons_pixel_values"])
                 recons_rgb_future_gripper = self.rgb_preprocessor.post_process(outputs_gripper["recons_pixel_values"])
+                recons_rgb_future_diff1 = self.rgb_preprocessor.post_process(outputs_diff1["recons_pixel_values"])
+                recons_rgb_future_diff2 = self.rgb_preprocessor.post_process(outputs_diff2["recons_pixel_values"])
                 gt_latent_motion_ids_static = outputs_static["indices"]
                 gt_latent_motion_ids_gripper = outputs_gripper["indices"]
                 exact_match = (gt_latent_motion_ids_static == gt_latent_motion_ids_gripper).float().mean()
@@ -154,46 +148,43 @@ class SSIM_EVAL:
                     data_range=1.0,
                     size_average=True
                 )
-                
-                print(f"Step {step}: ssim_static_cond: {ssim_static_cond}, ssim_static_target: {ssim_static_target}, ssim_gripper_cond: {ssim_gripper_cond}, ssim_gripper_target: {ssim_gripper_target}")
+                ssim_diff1_cond = ssim(
+                    recons_rgb_future_diff1,
+                    orig_rgb_seq_gripper[:, 0],
+                    data_range=1.0,
+                    size_average=True
+                )
+                ssim_diff2_cond = ssim(
+                    recons_rgb_future_diff2,
+                    orig_rgb_seq_static[:, 0],
+                    data_range=1.0,
+                    size_average=True
+                )
+                ssim_diff1_target = ssim(
+                    recons_rgb_future_diff1,
+                    orig_rgb_seq_gripper[:, 1],
+                    data_range=1.0,
+                    size_average=True
+                )
+                ssim_diff2_target = ssim(
+                    recons_rgb_future_diff2,
+                    orig_rgb_seq_static[:, 1],
+                    data_range=1.0,
+                    size_average=True
+                )
+                eval_diff1_cond.append(ssim_diff1_cond)
+                eval_diff2_cond.append(ssim_diff2_cond)
+                eval_diff1_target.append(ssim_diff1_target)
+                eval_diff2_target.append(ssim_diff2_target)
                 eval_static_cond.append(ssim_static_cond)
                 eval_static_target.append(ssim_static_target)
                 eval_gripper_cond.append(ssim_gripper_cond)
                 eval_gripper_target.append(ssim_gripper_target)
                 eval_exact_match.append(exact_match)
                 eval_cosine_sim.append(cosine_sim)
-                if self.paired_loss:
-                    recons_rgb_future_diff1 = self.rgb_preprocessor.post_process(outputs_diff1["recons_pixel_values"])
-                    recons_rgb_future_diff2 = self.rgb_preprocessor.post_process(outputs_diff2["recons_pixel_values"])
-                    ssim_diff1_cond = ssim(
-                        recons_rgb_future_diff1,
-                        orig_rgb_seq_gripper[:, 0],
-                        data_range=1.0,
-                        size_average=True
-                    )
-                    ssim_diff2_cond = ssim(
-                        recons_rgb_future_diff2,
-                        orig_rgb_seq_static[:, 0],
-                        data_range=1.0,
-                        size_average=True
-                    )
-                    ssim_diff1_target = ssim(
-                        recons_rgb_future_diff1,
-                        orig_rgb_seq_gripper[:, 1],
-                        data_range=1.0,
-                        size_average=True
-                    )
-                    ssim_diff2_target = ssim(
-                        recons_rgb_future_diff2,
-                        orig_rgb_seq_static[:, 1],
-                        data_range=1.0,
-                        size_average=True
-                    )
-                    print(f"ssim_diff1_cond: {ssim_diff1_cond}, ssim_diff1_target: {ssim_diff1_target}, ssim_diff2_cond: {ssim_diff2_cond}, ssim_diff2_target: {ssim_diff2_target}")
-                    eval_diff1_cond.append(ssim_diff1_cond)
-                    eval_diff2_cond.append(ssim_diff2_cond)
-                    eval_diff1_target.append(ssim_diff1_target)
-                    eval_diff2_target.append(ssim_diff2_target)
+                print(f"Step {step}: ssim_static_cond: {ssim_static_cond}, ssim_static_target: {ssim_static_target}, ssim_gripper_cond: {ssim_gripper_cond}, ssim_gripper_target: {ssim_gripper_target},\
+                      ssim_diff1_cond: {ssim_diff1_cond}, ssim_diff1_target: {ssim_diff1_target}, ssim_diff2_cond: {ssim_diff2_cond}, ssim_diff2_target: {ssim_diff2_target},\
+                          exact_match: {exact_match}, cosine_sim: {cosine_sim}")
                 
         eval_static_cond_mean = np.mean([x.cpu().numpy() for x in eval_static_cond])
         eval_static_target_mean = np.mean([x.cpu().numpy() for x in eval_static_target])
@@ -201,13 +192,11 @@ class SSIM_EVAL:
         eval_gripper_target_mean = np.mean([x.cpu().numpy() for x in eval_gripper_target])
         eval_exact_match_mean = np.mean([x.cpu().numpy() for x in eval_exact_match])
         eval_cosine_sim_mean = np.mean([x.cpu().numpy() for x in eval_cosine_sim])
-        if self.paired_loss:
-            eval_diff1_cond_mean = np.mean([x.cpu().numpy() for x in eval_diff1_cond])
-            eval_diff2_cond_mean = np.mean([x.cpu().numpy() for x in eval_diff2_cond])
-            eval_diff1_target_mean = np.mean([x.cpu().numpy() for x in eval_diff1_target])
-            eval_diff2_target_mean = np.mean([x.cpu().numpy() for x in eval_diff2_target])
-            return eval_static_cond_mean, eval_static_target_mean, eval_gripper_cond_mean, eval_gripper_target_mean, eval_diff1_cond_mean, eval_diff1_target_mean, eval_diff2_cond_mean, eval_diff2_target_mean, eval_exact_match_mean, eval_cosine_sim_mean
-        return eval_static_cond_mean, eval_static_target_mean, eval_gripper_cond_mean, eval_gripper_target_mean, eval_exact_match_mean, eval_cosine_sim_mean
+        eval_diff1_cond_mean = np.mean([x.cpu().numpy() for x in eval_diff1_cond])
+        eval_diff2_cond_mean = np.mean([x.cpu().numpy() for x in eval_diff2_cond])
+        eval_diff1_target_mean = np.mean([x.cpu().numpy() for x in eval_diff1_target])
+        eval_diff2_target_mean = np.mean([x.cpu().numpy() for x in eval_diff2_target])
+        return eval_static_cond_mean, eval_static_target_mean, eval_gripper_cond_mean, eval_gripper_target_mean, eval_diff1_cond_mean, eval_diff1_target_mean, eval_diff2_cond_mean, eval_diff2_target_mean, eval_exact_match_mean, eval_cosine_sim_mean
                 
 
                 
@@ -220,10 +209,7 @@ class SSIM_EVAL:
 
 def main(cfg):
     # Prepare Latent Motion Tokenizer
-    if cfg['paired_loss']:
-        latent_motion_tokenizer_config_path = cfg['paired_latent_motion_tokenizer_config_path']
-    else:
-        latent_motion_tokenizer_config_path = cfg['not_paired_latent_motion_tokenizer_config_path']
+    latent_motion_tokenizer_config_path = cfg['paired_latent_motion_tokenizer_config_path']
     print(f"initializing Latent Motion Tokenizer from {latent_motion_tokenizer_config_path} ...")
     latent_motion_tokenizer_config = omegaconf.OmegaConf.load(latent_motion_tokenizer_config_path)
     latent_motion_tokenizer = hydra.utils.instantiate(latent_motion_tokenizer_config)
@@ -253,7 +239,7 @@ def main(cfg):
     rgb_preprocessor = get_rgb_preprocessor(**cfg['rgb_preprocessor_config'])
     
     # evaluate
-    eval_step = 1000
+    eval_step = 500
     
     ssim = SSIM_EVAL(
         latent_motion_tokenizer=latent_motion_tokenizer,
@@ -264,48 +250,31 @@ def main(cfg):
         eval_step=eval_step,
         **cfg['training_config']
     )
-    if not cfg['paired_loss']:    
-        ssim_static_cond, ssim_static_target, ssim_gripper_cond, ssim_gripper_target, exact_match, cosine_sim = ssim.evaluate()
-        output_file = f"{cfg['training_config']['save_path']}/ssim.txt"
-        with open(output_file, "w") as f:
-            f.write(f"ssim_static_cond: {ssim_static_cond}\n")
-            f.write(f"ssim_static_target: {ssim_static_target}\n")
-            f.write(f"ssim_gripper_cond: {ssim_gripper_cond}\n")
-            f.write(f"ssim_gripper_target: {ssim_gripper_target}\n")
-            f.write(f"eval_exact_match: {exact_match}\n")
-            f.write(f"eval_cosine_sim: {cosine_sim}\n")
-        print(f"Results saved to {output_file}")
-        print(f"ssim_static_cond: {ssim_static_cond}")
-        print(f"ssim_static_target: {ssim_static_target}")
-        print(f"ssim_gripper_cond: {ssim_gripper_cond}")
-        print(f"ssim_gripper_target: {ssim_gripper_target}")
-        print(f"eval_exact_match: {exact_match}")
-        print(f"eval_cosine_sim: {cosine_sim}")
-    else:
-        ssim_static_cond, ssim_static_target, ssim_gripper_cond, ssim_gripper_target, ssim_diff1_cond, ssim_diff1_target, ssim_diff2_cond, ssim_diff2_target, exact_match, cosine_sim = ssim.evaluate()
-        output_file = f"{cfg['training_config']['save_path']}/ssim.txt"
-        with open(output_file, "w") as f:
-            f.write(f"ssim_static_cond: {ssim_static_cond}\n")
-            f.write(f"ssim_static_target: {ssim_static_target}\n")
-            f.write(f"ssim_gripper_cond: {ssim_gripper_cond}\n")
-            f.write(f"ssim_gripper_target: {ssim_gripper_target}\n")
-            f.write(f"ssim_diff1_cond: {ssim_diff1_cond}\n")
-            f.write(f"ssim_diff1_target: {ssim_diff1_target}\n")
-            f.write(f"ssim_diff2_cond: {ssim_diff2_cond}\n")
-            f.write(f"ssim_diff2_target: {ssim_diff2_target}\n")
-            f.write(f"eval_exact_match: {exact_match}\n")
-            f.write(f"eval_cosine_sim: {cosine_sim}\n")
-        print(f"Results saved to {output_file}")
-        print(f"ssim_static_cond: {ssim_static_cond}")
-        print(f"ssim_static_target: {ssim_static_target}")
-        print(f"ssim_gripper_cond: {ssim_gripper_cond}")
-        print(f"ssim_gripper_target: {ssim_gripper_target}")
-        print(f"ssim_diff1_cond: {ssim_diff1_cond}")
-        print(f"ssim_diff1_target: {ssim_diff1_target}")
-        print(f"ssim_diff2_cond: {ssim_diff2_cond}")
-        print(f"ssim_diff2_target: {ssim_diff2_target}")    
-        print(f"eval_exact_match: {exact_match}")
-        print(f"eval_cosine_sim: {cosine_sim}")
+    
+    ssim_static_cond, ssim_static_target, ssim_gripper_cond, ssim_gripper_target, ssim_diff1_cond, ssim_diff1_target, ssim_diff2_cond, ssim_diff2_target, exact_match, cosine_sim = ssim.evaluate()
+    output_file = f"{cfg['training_config']['save_path']}/ssim.txt"
+    with open(output_file, "w") as f:
+        f.write(f"ssim_static_cond: {ssim_static_cond}\n")
+        f.write(f"ssim_static_target: {ssim_static_target}\n")
+        f.write(f"ssim_gripper_cond: {ssim_gripper_cond}\n")
+        f.write(f"ssim_gripper_target: {ssim_gripper_target}\n")
+        f.write(f"ssim_diff1_cond: {ssim_diff1_cond}\n")
+        f.write(f"ssim_diff1_target: {ssim_diff1_target}\n")
+        f.write(f"ssim_diff2_cond: {ssim_diff2_cond}\n")
+        f.write(f"ssim_diff2_target: {ssim_diff2_target}\n")
+        f.write(f"eval_exact_match: {exact_match}\n")
+        f.write(f"eval_cosine_sim: {cosine_sim}\n")
+    print(f"Results saved to {output_file}")
+    print(f"ssim_static_cond: {ssim_static_cond}")
+    print(f"ssim_static_target: {ssim_static_target}")
+    print(f"ssim_gripper_cond: {ssim_gripper_cond}")
+    print(f"ssim_gripper_target: {ssim_gripper_target}")
+    print(f"ssim_diff1_cond: {ssim_diff1_cond}")
+    print(f"ssim_diff1_target: {ssim_diff1_target}")
+    print(f"ssim_diff2_cond: {ssim_diff2_cond}")
+    print(f"ssim_diff2_target: {ssim_diff2_target}")    
+    print(f"eval_exact_match: {exact_match}")
+    print(f"eval_cosine_sim: {cosine_sim}")
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config_path', type=str, default='/home/yyang-infobai/Moto/latent_motion_tokenizer/configs/train/data_calvin.yaml')

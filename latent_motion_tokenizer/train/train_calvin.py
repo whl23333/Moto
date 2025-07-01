@@ -56,6 +56,8 @@ def main(cfg):
         eval_dataloader=eval_dataloader,
         bs_per_gpu=cfg['dataloader_config']['bs_per_gpu'],
         paired_loss=cfg['paired_loss'],
+        lm_restrict=cfg['lm_restrict'],
+        lm_restrict_weight= cfg['lm_restrict_weight'],
         **cfg['training_config']
     )
 

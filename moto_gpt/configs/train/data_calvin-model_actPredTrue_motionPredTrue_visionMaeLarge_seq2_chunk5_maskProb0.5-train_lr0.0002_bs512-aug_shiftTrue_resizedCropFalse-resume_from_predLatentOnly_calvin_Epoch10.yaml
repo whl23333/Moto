@@ -1,8 +1,8 @@
 moto_gpt_config_path: "/home/yyang-infobai/Moto/moto_gpt/configs/models/actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5.yaml"
-latent_motion_tokenizer_path: "/home/yyang-infobai/Moto/latent_motion_tokenizer/outputs/calvin/not_paired_b32_gpu4/saved_epoch_10_step_140240"
+latent_motion_tokenizer_path: "/home/yyang-infobai/Moto/latent_motion_tokenizer/outputs/calvin/paired_b32_gpu1_calvinD_D_add_with_corner/saved_epoch_17_step_272051"
 dataset_config_path: "/home/yyang-infobai/Moto/moto_gpt/configs/data/calvin.yaml"
 dataloader_config:
-  bs_per_gpu: 16
+  bs_per_gpu: 64
   workers_per_gpu: 7
   prefetch_factor: 2
 rgb_preprocessor_config: 
@@ -19,8 +19,8 @@ training_config:
   gradient_accumulation_steps: 8
   save_epochs: 1
   save_steps: 10000
-  save_path: "/home/yyang-infobai/Moto/moto_gpt/outputs/moto_gpt_finetuned_on_calvin/not_paired_lm4_10_pt_3"
-  resume_ckpt_path: "/home/yyang-infobai/Moto/moto_gpt/outputs/moto_gpt_pretrained_on_calvin/not_paired/saved_epoch_3_step_50238"
+  save_path: "/home/yyang-infobai/Moto/moto_gpt/outputs/moto_gpt_finetuned_on_calvin/paired_b32_gpu1_calvinD_D_add_with_corner_epoch17/pretrained_epoch10"
+  resume_ckpt_path: /home/yyang-infobai/Moto/moto_gpt/outputs/moto_gpt_pretrained_on_calvin/paired_b32_gpu1_calvinD_D_add_with_corner_epoch17/saved_epoch_10_step_48270
   max_epoch: 20
   pred_binary_gripper_action: true
-  paired_loss: false
+  paired_loss: true

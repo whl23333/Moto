@@ -74,7 +74,7 @@ class LatentMotionTokenizer(nn.Module):
 
 
     @torch.no_grad()
-    def decode_image(self, cond_pixel_values, given_motion_token_ids):
+    def decode_image(self, cond_pixel_values, given_motion_token_ids, **kwargs):
         quant = self.vector_quantizer.get_codebook_entry(given_motion_token_ids)
         latent_motion_tokens_up = self.vq_up_resampler(quant)
         recons_pixel_values = self.decoder(cond_input=cond_pixel_values, latent_motion_tokens=latent_motion_tokens_up)
@@ -257,10 +257,10 @@ class PairedLatentMotionTokenizer(nn.Module):
 
 
     @torch.no_grad()
-    def decode_image(self, cond_pixel_values, given_motion_token_ids):
+    def decode_image(self, cond_pixel_values, given_motion_token_ids, **kwargs):
         quant = self.vector_quantizer.get_codebook_entry(given_motion_token_ids)
         latent_motion_tokens_up = self.vq_up_resampler(quant)
-        recons_pixel_values = self.decoder(cond_input=cond_pixel_values, latent_motion_tokens=latent_motion_tokens_up)
+        recons_pixel_values = self.decoder(cond_input=cond_pixel_values, latent_motion_tokens=latent_motion_tokens_up, **kwargs)
         return  {
             "recons_pixel_values": recons_pixel_values,
         }
@@ -304,6 +304,7 @@ class PairedLatentMotionTokenizer(nn.Module):
                 target_pixel_values2,  # 第二组目标图像（用于计算重建损失）
                 return_recons_only=False,
                 return_motion_token_ids_only=False,
+                return_latent_motion_embeddings=False,
                 **kwargs):
 
         # ================== 第一阶段：用第一组数据生成latent tokens ==================
@@ -392,5 +393,7 @@ class PairedLatentMotionTokenizer(nn.Module):
         
         outputs["loss"] = loss
         outputs["active_code_num"] = torch.tensor(torch.unique(indices).shape[0]).float().to(loss.device)
+        if return_latent_motion_embeddings:
+            outputs["latent_motion_embeddings"] = latent_motion_tokens
 
         return outputs

@@ -256,7 +256,8 @@ class MotoGPT_Trainer:
             )
         recons_rgb_future = self.latent_motion_tokenizer.decode_image(
             cond_pixel_values=rgb_seq[:,:-1].reshape(-1, c, h, w),
-            given_motion_token_ids=gt_latent_motion_ids
+            given_motion_token_ids=gt_latent_motion_ids,
+            corner=['static']
         )["recons_pixel_values"]
 
         gt_latent_motion_ids = gt_latent_motion_ids.reshape(b, t, -1)
@@ -330,7 +331,8 @@ class MotoGPT_Trainer:
                     cur_latent_motion_ids[:,buffer_len-1] = cur_latent_motion_id_preds
                     cur_frame_preds = self.latent_motion_tokenizer.decode_image(
                         cond_pixel_values=cur_cond_pixel_values,
-                        given_motion_token_ids=cur_latent_motion_id_preds
+                        given_motion_token_ids=cur_latent_motion_id_preds,
+                        corner=['static']
                     )["recons_pixel_values"] # (b, c, h, w)
                     cur_cond_pixel_values = cur_frame_preds
                     frame_preds.append(cur_frame_preds.unsqueeze(1))
@@ -391,7 +393,7 @@ class MotoGPT_Trainer:
                 ).reshape(b, t, -1)
         else:
             latent_motion_ids = None
-        print(batch['lang_input_ids'].shape)
+
         # compute loss
         attention_mask = batch['mask'][..., 0]
         pred = self.moto_gpt(

@@ -69,10 +69,8 @@ class LMDViTEmbeddings(nn.Module):
             embeddings = torch.cat((latent_motion_tokens, embeddings), dim=1)
         elif self.query_fusion_mode == 'add_with_corner':
             assert "corner" in kwargs, "corner is required for add_with_corner mode"
-            assert "bs_per_gpu" in kwargs, "bs_per_gpu is required for add_with_corner mode"
             corner = kwargs["corner"]
-            bs_per_gpu = kwargs["bs_per_gpu"]
-            corner=[string for string in corner for _ in range(bs_per_gpu)]
+            corner=[string for string in corner for _ in range(int(batch_size/len(corner)))] # repeat corner for each batch
             corner = self.lang_tokenizer(corner, return_tensors='pt', padding='max_length', truncation=True, max_length=self.lang_max_length).to(pixel_values.device)
             corner_embeddings = self.lang_encoder(**corner).last_hidden_state
             corner_embeddings = corner_embeddings.reshape(batch_size, 1, -1)

@@ -214,8 +214,10 @@ class LatentMotionTokenizer_Trainer:
 
         self.latent_motion_tokenizer.eval()
         outputs = self.latent_motion_tokenizer(
-            cond_pixel_values=rgb_seq[:,0],
-            target_pixel_values=rgb_seq[:,1],
+            cond_pixel_values1=rgb_seq[:,0],
+            target_pixel_values1=rgb_seq[:,1],
+            cond_pixel_values2=rgb_seq[:,0],
+            target_pixel_values2=rgb_seq[:,1],
             return_recons_only=True
         )
             
@@ -241,8 +243,10 @@ class LatentMotionTokenizer_Trainer:
 
         # compute loss
         loss = self.latent_motion_tokenizer(
-            cond_pixel_values=rgb_seq[:,0],
-            target_pixel_values=rgb_seq[:,1]
+            cond_pixel_values1=rgb_seq[:,0],
+            target_pixel_values1=rgb_seq[:,1],
+            cond_pixel_values2=rgb_seq[:,0],
+            target_pixel_values2=rgb_seq[:,1],
         )
 
         return loss
@@ -1138,6 +1142,8 @@ class LatentMotionTokenizer_Trainer_Multiview:
         bs_per_gpu=32,
         max_epoch=None,
         paired_loss = False,
+        lm_restrict = False,
+        lm_restrict_weight=0.1
     ):
         if resume_ckpt_path is not None:
             print(f"resuming Latent Motion Tokenizer from {resume_ckpt_path} ...")
@@ -1192,6 +1198,8 @@ class LatentMotionTokenizer_Trainer_Multiview:
         self.print_steps = print_steps
         self.bs_per_gpu = bs_per_gpu
         self.paired_loss = paired_loss
+        self.lm_restrict = lm_restrict
+        self.lm_restrict_weight = lm_restrict_weight
 
 
     @property
@@ -1253,7 +1261,10 @@ class LatentMotionTokenizer_Trainer_Multiview:
                     self.latent_motion_tokenizer.train()
                     self.optimizer.zero_grad()
                     if self.paired_loss:
-                        loss = self.calculate_paired_loss(batch, train=True)
+                        if self.lm_restrict:
+                            loss = self.calculate_paired_loss_lm_restrict(batch, train=True, weight=self.lm_restrict_weight)
+                        else:    
+                            loss = self.calculate_paired_loss(batch, train=True)
                     else:
                         loss = self.calculate_loss(batch, train=True)
                     self.accelerator.backward(loss['loss'])
@@ -1492,6 +1503,59 @@ class LatentMotionTokenizer_Trainer_Multiview:
             bs_per_gpu=self.bs_per_gpu
         )
         return outputs
+    
+    def calculate_paired_loss_lm_restrict(self, batch, train, weight=0.1):
+        rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1)
+        rgb_seq_static = self.rgb_preprocessor(rgb_seq_static, train=train)
+        rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1)
+        rgb_seq_gripper = self.rgb_preprocessor(rgb_seq_gripper, train=train)
+        cond1 = torch.cat([
+            rgb_seq_static[:,0],
+            rgb_seq_gripper[:,0],
+            rgb_seq_static[:,0],
+            rgb_seq_gripper[:,0]
+        ], dim=0)
+        target1 = torch.cat([
+            rgb_seq_static[:,1],
+            rgb_seq_gripper[:,1],
+            rgb_seq_static[:,1],
+            rgb_seq_gripper[:,1]
+        ], dim=0)
+        cond2 = torch.cat([
+            rgb_seq_static[:,0],
+            rgb_seq_gripper[:,0],
+            rgb_seq_gripper[:,0],
+            rgb_seq_static[:,0]
+        ], dim=0)
+        target2 = torch.cat([
+            rgb_seq_static[:,1],
+            rgb_seq_gripper[:,1],
+            rgb_seq_gripper[:,1],
+            rgb_seq_static[:,1]
+        ], dim=0)
+        corners = ['static', 'gripper', 'gripper', 'static']
+        
+        outputs = self.latent_motion_tokenizer(
+            cond_pixel_values1=cond1,
+            target_pixel_values1=target1,
+            cond_pixel_values2=cond2,
+            target_pixel_values2=target2,
+            return_latent_motion_embeddings=True,
+            corner=corners,
+            bs_per_gpu=self.bs_per_gpu
+        )
+        bs = rgb_seq_static.shape[0]
+        lm1 = outputs['latent_motion_embeddings'][:bs]
+        lm2 = outputs['latent_motion_embeddings'][bs:2*bs]
+        lm_restrict = F.mse_loss(lm1, lm2)* weight
+        outputs.pop('latent_motion_embeddings')
+        outputs['lm_restrict'] = lm_restrict
+        outputs['loss'] += lm_restrict
+        return outputs
+        
+        
+        
+        
 
 
     def log(self, log_loss, eval_log_loss, cum_load_time, clock, epoch, batch_idx, step):
