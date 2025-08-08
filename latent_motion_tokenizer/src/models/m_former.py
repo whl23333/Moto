@@ -58,6 +58,49 @@ class MFormerEmbeddings(nn.Module):
 
         return embeddings
 
+class MFormerEmbeddingsFlow(nn.Module):
+    def __init__(self, config: ViTConfig) -> None:
+        super().__init__()
+        query_num = config.query_num
+        self.query_num = query_num
+        self.latent_motion_token = nn.Parameter(torch.zeros(1, query_num, config.hidden_size))
+        self.sep_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+        self.projection = nn.Linear(config.input_hidden_size, config.hidden_size, bias=True)
+        # 只需要 flow patch 数量
+        self.position_embeddings = nn.Parameter(torch.randn(1, config.num_patches + 1 + query_num, config.hidden_size))
+        self.token_type_embeddings = nn.Parameter(torch.randn(2, config.hidden_size))
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.config = config
+        if hasattr(config, "legacy"):
+            self.legacy = config.legacy
+        else:
+            self.legacy = True
+        
+    def forward(
+        self,
+        flow_hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, per_seq_length = flow_hidden_states.shape[:2]
+
+        flow_embeddings = self.projection(flow_hidden_states)  # [B, L, H]
+
+        latent_motion_tokens = self.latent_motion_token.expand(batch_size, -1, -1)
+        sep_tokens = self.sep_token.expand(batch_size, -1, -1)
+        # 拼接 latent_motion_token、flow_embeddings、sep_token
+        embeddings = torch.cat((latent_motion_tokens, flow_embeddings, sep_tokens), dim=1)
+
+        # add positional encoding to each token
+        embeddings = embeddings + self.position_embeddings
+
+        # add token type encoding
+        # 这里可以全部用同一个 token_type_embedding，也可以根据 legacy 区分
+        token_type_embeddings = self.token_type_embeddings[0].expand(batch_size, per_seq_length + self.query_num + 1, -1)
+        embeddings = embeddings + token_type_embeddings
+
+        embeddings = self.dropout(embeddings)
+
+        return embeddings
+
 class ViTPooler(nn.Module):
     def __init__(self, config: ViTConfig):
         super().__init__()
@@ -75,12 +118,17 @@ class ViTPooler(nn.Module):
 class MFormer(ViTPreTrainedModel):
     def __init__(self,
                  config: ViTConfig,
-                 add_pooling_layer: bool = True):
-
+                 add_pooling_layer: bool = True,
+                 use_flow: bool = False,):
         super().__init__(config)
         self.config = config
         self.query_num = config.query_num
-        self.embeddings = MFormerEmbeddings(config)
+        if use_flow:
+            self.embeddings = MFormerEmbeddingsFlow(config)
+        else:
+            self.embeddings = MFormerEmbeddings(config)
+        self.use_flow = use_flow
+        # self.embeddings = MFormerEmbeddings(config)
         self.encoder = ViTEncoder(config)
 
         self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -143,6 +191,7 @@ class MFormer(ViTPreTrainedModel):
         self,
         cond_hidden_states: torch.Tensor,
         target_hidden_states: torch.Tensor,
+        flow_hidden_states: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -164,12 +213,18 @@ class MFormer(ViTPreTrainedModel):
         # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
-
-
-        embedding_output = self.embeddings(
-            cond_hidden_states=cond_hidden_states,
-            target_hidden_states=target_hidden_states
-        )
+        
+        if self.use_flow:
+            assert flow_hidden_states is not None, "flow_hidden_states must be provided when use_flow is True."
+            embedding_output = self.embeddings(
+                flow_hidden_states=flow_hidden_states
+            )
+        else:
+            assert flow_hidden_states is None, "flow_hidden_states should not be provided when use_flow is False."
+            embedding_output = self.embeddings(
+                cond_hidden_states=cond_hidden_states,
+                target_hidden_states=target_hidden_states
+            )
 
         encoder_outputs = self.encoder(
             embedding_output,

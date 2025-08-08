@@ -3,6 +3,8 @@ codebook_dim: 32
 commit_loss_w: 1.0
 recon_loss_w: 1.0
 perceptual_loss_w: 1.0
+use_optical_flow: false
+flow_checkpoint_path: "/home/yyang-infobai/Moto/unimatch/pretrained/gmflow-scale2-regrefine6-mixdata-train320x576-4e7b215d.pth"
 
 image_encoder:
   _target_: transformers.ViTMAEModel.from_pretrained
@@ -11,6 +13,7 @@ image_encoder:
 m_former:
   _target_: latent_motion_tokenizer.src.models.m_former.MFormer
   add_pooling_layer: false
+  use_flow: false
   config:
     _target_: transformers.ViTConfig
     query_num: 8
@@ -57,4 +60,24 @@ decoder:
     qkv_bias: true
     encoder_stride: 16
     num_patches: 196
-    # query_fusion_mode: add_with_corner
+    query_fusion_mode: add
+
+optical_flow_model:
+  _target_: unimatch.unimatch.unimatch.UniMatch
+  feature_channels: 128
+  num_scales: 2
+  upsample_factor: 4
+  num_head: 1
+  ffn_dim_expansion: 4
+  num_transformer_layers: 6
+  reg_refine: true
+  task: "flow"
+
+compute_flow_kwargs: {
+  attn_type: "swin",
+  attn_splits_list: [2, 8],
+  corr_radius_list: [-1, 4],
+  prop_radius_list: [-1, 1],
+  num_reg_refine: 6,
+  task: "flow"
+}

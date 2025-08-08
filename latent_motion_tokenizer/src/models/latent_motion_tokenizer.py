@@ -9,7 +9,9 @@ from PIL import Image
 from torchvision import transforms as T
 import time
 from collections import OrderedDict
-
+from unimatch.unimatch.unimatch import UniMatch
+from typing import List, Dict, Optional, Tuple, Union, Any
+from unimatch.utils.flow_viz import flow_to_image_torch
 
 class LatentMotionTokenizer(nn.Module):
     def __init__(
@@ -25,6 +27,10 @@ class LatentMotionTokenizer(nn.Module):
             recon_hidden_loss_w=1.,
             perceptual_loss_w=1.,
             use_abs_recons_loss=False,
+            use_optical_flow=False,
+            optical_flow_model=None,
+            flow_checkpoint_path=None,
+            compute_flow_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
 
@@ -60,6 +66,16 @@ class LatentMotionTokenizer(nn.Module):
         self.perceptual_loss_w = perceptual_loss_w
         self.loss_fn_lpips = lpips.LPIPS(net='vgg').requires_grad_(False).eval()
         self.use_abs_recons_loss = use_abs_recons_loss
+        self.use_optical_flow = use_optical_flow
+        self.compute_flow_kwargs = compute_flow_kwargs
+        if self.use_optical_flow:
+            assert optical_flow_model is not None, "Optical flow model must be provided if use_optical_flow is True."
+            assert flow_checkpoint_path is not None, "Flow checkpoint path must be provided if use_optical_flow is True."
+            self.optical_flow_model = optical_flow_model
+            if isinstance(optical_flow_model, UniMatch):
+                self.optical_flow_model.load_state_dict(torch.load(flow_checkpoint_path, map_location='cpu'), strict=False)
+            self.optical_flow_model.requires_grad_(False).eval()
+            
 
     @property
     def device(self):
@@ -77,7 +93,7 @@ class LatentMotionTokenizer(nn.Module):
     def decode_image(self, cond_pixel_values, given_motion_token_ids, **kwargs):
         quant = self.vector_quantizer.get_codebook_entry(given_motion_token_ids)
         latent_motion_tokens_up = self.vq_up_resampler(quant)
-        recons_pixel_values = self.decoder(cond_input=cond_pixel_values, latent_motion_tokens=latent_motion_tokens_up)
+        recons_pixel_values = self.decoder(cond_input=cond_pixel_values, latent_motion_tokens=latent_motion_tokens_up, **kwargs)
         return  {
             "recons_pixel_values": recons_pixel_values,
         }
@@ -116,17 +132,42 @@ class LatentMotionTokenizer(nn.Module):
 
     def forward(self, cond_pixel_values, target_pixel_values,
                 return_recons_only=False, 
-                return_motion_token_ids_only=False): 
+                return_motion_token_ids_only=False,
+                **kwargs): 
 
         # Tokenization
         with torch.no_grad():
             cond_hidden_states = self.image_encoder(cond_pixel_values).last_hidden_state
             target_hidden_states = self.image_encoder(target_pixel_values).last_hidden_state
+        
+        if self.use_optical_flow:
+            assert self.compute_flow_kwargs is not None, "compute_flow_kwargs must be provided when use_optical_flow is True."
+            flow_pixel_values = self.optical_flow_model(
+                cond_pixel_values,
+                target_pixel_values,
+                **self.compute_flow_kwargs
+            )['flow_preds'][-1]
+        
+            flow_pixel_values = rearrange(flow_pixel_values, 'b c h w -> b h w c')
+            
+            flow_rgb = flow_to_image_torch(flow_pixel_values)
+            flow_rgb = rearrange(flow_rgb, 'b h w c -> b c h w')
+            flow_hidden_states = self.image_encoder(flow_rgb).last_hidden_state
 
         query_num = self.m_former.query_num
-        latent_motion_tokens = self.m_former(
-            cond_hidden_states=cond_hidden_states,
-            target_hidden_states=target_hidden_states).last_hidden_state[:, :query_num]
+        if self.use_optical_flow:
+            latent_motion_tokens = self.m_former(
+                cond_hidden_states=cond_hidden_states,
+                target_hidden_states=target_hidden_states,
+                flow_hidden_states=flow_hidden_states).last_hidden_state[:, :query_num]
+        else:
+            # Use the original MFormer without optical flow
+            latent_motion_tokens = self.m_former(
+                cond_hidden_states=cond_hidden_states,
+                target_hidden_states=target_hidden_states).last_hidden_state[:, :query_num]
+        # latent_motion_tokens = self.m_former(
+        #     cond_hidden_states=cond_hidden_states,
+        #     target_hidden_states=target_hidden_states).last_hidden_state[:, :query_num]
 
         latent_motion_tokens_down = self.vq_down_resampler(latent_motion_tokens)
         quant, indices, commit_loss = self.vector_quantizer(latent_motion_tokens_down)
@@ -140,7 +181,8 @@ class LatentMotionTokenizer(nn.Module):
         latent_motion_tokens_up = self.vq_up_resampler(quant)
         recons_pixel_values = self.decoder(
             cond_input=cond_pixel_values,
-            latent_motion_tokens=latent_motion_tokens_up
+            latent_motion_tokens=latent_motion_tokens_up,
+            **kwargs
         )
             
         if return_recons_only:
@@ -208,6 +250,10 @@ class PairedLatentMotionTokenizer(nn.Module):
             recon_hidden_loss_w=1.,
             perceptual_loss_w=1.,
             use_abs_recons_loss=False,
+            use_optical_flow=False,
+            optical_flow_model=None,
+            flow_checkpoint_path=None,
+            compute_flow_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
 
@@ -243,6 +289,16 @@ class PairedLatentMotionTokenizer(nn.Module):
         self.perceptual_loss_w = perceptual_loss_w
         self.loss_fn_lpips = lpips.LPIPS(net='vgg').requires_grad_(False).eval()
         self.use_abs_recons_loss = use_abs_recons_loss
+        self.use_optical_flow = use_optical_flow
+        self.compute_flow_kwargs = compute_flow_kwargs
+        if self.use_optical_flow:
+            assert optical_flow_model is not None, "Optical flow model must be provided if use_optical_flow is True."
+            assert flow_checkpoint_path is not None, "Flow checkpoint path must be provided if use_optical_flow is True."
+            self.optical_flow_model = optical_flow_model
+            if isinstance(optical_flow_model, UniMatch):
+                self.optical_flow_model.load_state_dict(torch.load(flow_checkpoint_path, map_location='cpu'), strict=False)
+            self.optical_flow_model.requires_grad_(False).eval()
+
 
     @property
     def device(self):
@@ -313,12 +369,39 @@ class PairedLatentMotionTokenizer(nn.Module):
             cond1_hidden = self.image_encoder(cond_pixel_values1).last_hidden_state  # (b, 197, 1024)
             target1_hidden = self.image_encoder(target_pixel_values1).last_hidden_state # (b, 197, 1024)
 
+        if self.use_optical_flow:
+            assert self.compute_flow_kwargs is not None, "compute_flow_kwargs must be provided when use_optical_flow is True."
+            flow_pixel_values = self.optical_flow_model(
+                cond_pixel_values1,
+                target_pixel_values1,
+                **self.compute_flow_kwargs
+            )["flow_preds"][-1]
+            
+            flow_pixel_values = rearrange(flow_pixel_values, 'b c h w -> b h w c')
+            flow_rgb = flow_to_image_torch(flow_pixel_values)
+            flow_rgb = rearrange(flow_rgb, 'b h w c -> b c h w')
+            flow_hidden_states = self.image_encoder(flow_rgb).last_hidden_state
+        
+
         # 生成运动token
         query_num = self.m_former.query_num # 8
-        latent_motion_tokens = self.m_former(
-            cond_hidden_states=cond1_hidden,
-            target_hidden_states=target1_hidden
-        ).last_hidden_state[:, :query_num] # (b, 8, 768)
+        
+        if self.use_optical_flow:
+            latent_motion_tokens = self.m_former(
+                cond_hidden_states=cond1_hidden,
+                target_hidden_states=target1_hidden,
+                flow_hidden_states=flow_hidden_states
+            ).last_hidden_state[:, :query_num]
+        else:
+            # 使用原始的MFormer，不使用光流
+            latent_motion_tokens = self.m_former(
+                cond_hidden_states=cond1_hidden,
+                target_hidden_states=target1_hidden
+            ).last_hidden_state[:, :query_num]
+        # latent_motion_tokens = self.m_former(
+        #     cond_hidden_states=cond1_hidden,
+        #     target_hidden_states=target1_hidden
+        # ).last_hidden_state[:, :query_num] # (b, 8, 768)
 
         # 量化处理
         latent_motion_tokens_down = self.vq_down_resampler(latent_motion_tokens)

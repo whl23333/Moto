@@ -214,10 +214,8 @@ class LatentMotionTokenizer_Trainer:
 
         self.latent_motion_tokenizer.eval()
         outputs = self.latent_motion_tokenizer(
-            cond_pixel_values1=rgb_seq[:,0],
-            target_pixel_values1=rgb_seq[:,1],
-            cond_pixel_values2=rgb_seq[:,0],
-            target_pixel_values2=rgb_seq[:,1],
+            cond_pixel_values=rgb_seq[:,0],
+            target_pixel_values=rgb_seq[:,1],
             return_recons_only=True
         )
             
@@ -243,10 +241,8 @@ class LatentMotionTokenizer_Trainer:
 
         # compute loss
         loss = self.latent_motion_tokenizer(
-            cond_pixel_values1=rgb_seq[:,0],
-            target_pixel_values1=rgb_seq[:,1],
-            cond_pixel_values2=rgb_seq[:,0],
-            target_pixel_values2=rgb_seq[:,1],
+            cond_pixel_values=rgb_seq[:,0],
+            target_pixel_values=rgb_seq[:,1]
         )
 
         return loss
@@ -1142,8 +1138,8 @@ class LatentMotionTokenizer_Trainer_Multiview:
         bs_per_gpu=32,
         max_epoch=None,
         paired_loss = False,
-        lm_restrict = False,
-        lm_restrict_weight=0.1
+        lm_restrict_weight=None,
+        paired_method = None
     ):
         if resume_ckpt_path is not None:
             print(f"resuming Latent Motion Tokenizer from {resume_ckpt_path} ...")
@@ -1198,8 +1194,9 @@ class LatentMotionTokenizer_Trainer_Multiview:
         self.print_steps = print_steps
         self.bs_per_gpu = bs_per_gpu
         self.paired_loss = paired_loss
-        self.lm_restrict = lm_restrict
         self.lm_restrict_weight = lm_restrict_weight
+        self.paired_method = paired_method
+        print(f"paired method: {self.paired_method}, paired loss: {self.paired_loss}, lm_restrict_weight: {self.lm_restrict_weight}")
 
 
     @property
@@ -1261,10 +1258,15 @@ class LatentMotionTokenizer_Trainer_Multiview:
                     self.latent_motion_tokenizer.train()
                     self.optimizer.zero_grad()
                     if self.paired_loss:
-                        if self.lm_restrict:
+                        if self.paired_method == 'lm_restrict':
+                            assert self.lm_restrict_weight is not None, "lm_restrict_weight must be set when paired_method is 'lm_restrict'"
                             loss = self.calculate_paired_loss_lm_restrict(batch, train=True, weight=self.lm_restrict_weight)
-                        else:    
+                        elif self.paired_method == 'paired':
                             loss = self.calculate_paired_loss(batch, train=True)
+                        elif self.paired_method == 'paired_half':
+                            loss = self.calculate_paired_loss_half(batch, train=True)
+                        else:    
+                            raise ValueError(f"Unknown paired_method: {self.paired_method}")
                     else:
                         loss = self.calculate_loss(batch, train=True)
                     self.accelerator.backward(loss['loss'])
@@ -1422,24 +1424,50 @@ class LatentMotionTokenizer_Trainer_Multiview:
                 )
                 
         else:
+            cond = torch.cat([
+                rgb_seq_static[:, 0],
+                rgb_seq_gripper[:, 0]
+            ], dim=0)
+            target = torch.cat([
+                rgb_seq_static[:, 1],
+                rgb_seq_gripper[:, 1]
+            ], dim=0)
+            corners = ['static', 'gripper']
+            
             outputs = self.latent_motion_tokenizer(
-                cond_pixel_values=rgb_seq_static[:, 0],
-                target_pixel_values=rgb_seq_static[:, 1],
-                return_recons_only=True
+                cond_pixel_values=cond,
+                target_pixel_values=target,
+                return_recons_only=True,
+                corner = corners,
+                bs_per_gpu=self.bs_per_gpu
             )
             
-            recons_rgb_future = self.rgb_preprocessor.post_process(outputs["recons_pixel_values"]).detach().cpu()  # (b, c, h, w)
-            gt_latent_motion_ids = outputs["indices"].detach().cpu() # (b, per_latent_motion_len)
+            batch_size = rgb_seq_static.shape[0]
+            outputs_static = {k: v[:batch_size] for k, v in outputs.items()}
+            outputs_gripper = {k: v[batch_size:] for k, v in outputs.items()}
+            recons_rgb_future_static = self.rgb_preprocessor.post_process(outputs_static["recons_pixel_values"]).detach().cpu()
+            recons_rgb_future_gripper = self.rgb_preprocessor.post_process(outputs_gripper["recons_pixel_values"]).detach().cpu()
+            gt_latent_motion_ids_static = outputs_static["indices"].detach().cpu()
+            gt_latent_motion_ids_gripper = outputs_gripper["indices"].detach().cpu()
+            
             # orig_rgb_seq = orig_rgb_seq.detach().cpu()
             orig_rgb_seq_static = self.rgb_preprocessor.post_process(rgb_seq_static).detach().cpu()
+            orig_rgb_seq_gripper = self.rgb_preprocessor.post_process(rgb_seq_gripper).detach().cpu()
 
             for i in range(orig_rgb_seq_static.shape[0]):
                 visualize_latent_motion_reconstruction(
                     initial_frame=orig_rgb_seq_static[i,0],
                     next_frame=orig_rgb_seq_static[i,1],
-                    recons_next_frame=recons_rgb_future[i],
-                    latent_motion_ids=gt_latent_motion_ids[i],
-                    path=os.path.join(visualization_dir, f"{self.process_index}-{i}.png")
+                    recons_next_frame=recons_rgb_future_static[i],
+                    latent_motion_ids=gt_latent_motion_ids_static[i],
+                    path=os.path.join(visualization_dir, f"{self.process_index}-{i}-static.png")
+                )
+                visualize_latent_motion_reconstruction(
+                    initial_frame=orig_rgb_seq_gripper[i,0],
+                    next_frame=orig_rgb_seq_gripper[i,1],
+                    recons_next_frame=recons_rgb_future_gripper[i],
+                    latent_motion_ids=gt_latent_motion_ids_gripper[i],
+                    path=os.path.join(visualization_dir, f"{self.process_index}-{i}-gripper.png")
                 )
 
 
@@ -1449,19 +1477,24 @@ class LatentMotionTokenizer_Trainer_Multiview:
         rgb_seq_static = self.rgb_preprocessor(rgb_seq_static, train=train)
         rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1)
         rgb_seq_gripper = self.rgb_preprocessor(rgb_seq_gripper, train=train)
+        cond = torch.cat([
+            rgb_seq_static[:, 0],
+            rgb_seq_gripper[:, 0]
+        ], dim=0)
+        target = torch.cat([
+            rgb_seq_static[:, 1],
+            rgb_seq_gripper[:, 1]
+        ], dim=0)
+        corners = ['static', 'gripper']
         
-        loss_static = self.latent_motion_tokenizer(
-            cond_pixel_values=rgb_seq_static[:, 0],
-            target_pixel_values=rgb_seq_static[:, 1]
+        outputs = self.latent_motion_tokenizer(
+            cond_pixel_values=cond,
+            target_pixel_values=target,
+            corner=corners,
+            bs_per_gpu=self.bs_per_gpu,
         )
-        loss_gripper = self.latent_motion_tokenizer(
-            cond_pixel_values=rgb_seq_gripper[:, 0],
-            target_pixel_values=rgb_seq_gripper[:, 1]
-        )
-        loss_sum = {}
-        for key in loss_static:
-            loss_sum[key] = (loss_static[key] + loss_gripper[key]) / 2.0
-        return loss_sum
+        
+        return outputs
 
     def calculate_paired_loss(self, batch, train):
         rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1)
@@ -1549,12 +1582,44 @@ class LatentMotionTokenizer_Trainer_Multiview:
         lm2 = outputs['latent_motion_embeddings'][bs:2*bs]
         lm_restrict = F.mse_loss(lm1, lm2)* weight
         outputs.pop('latent_motion_embeddings')
+        print(outputs['loss'], lm_restrict)
         outputs['lm_restrict'] = lm_restrict
         outputs['loss'] += lm_restrict
         return outputs
         
         
+    def calculate_paired_loss_half(self, batch, train):
+        rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1)
+        rgb_seq_static = self.rgb_preprocessor(rgb_seq_static, train=train)
+        rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1)
+        rgb_seq_gripper = self.rgb_preprocessor(rgb_seq_gripper, train=train)
+        cond1 = torch.cat([
+            rgb_seq_static[:,0],
+            rgb_seq_static[:,0]
+        ], dim=0)
+        target1 = torch.cat([
+            rgb_seq_static[:,1],
+            rgb_seq_static[:,1]
+        ], dim=0)
+        cond2 = torch.cat([
+            rgb_seq_static[:,0],
+            rgb_seq_gripper[:,0]
+        ], dim=0)
+        target2 = torch.cat([
+            rgb_seq_static[:,1],
+            rgb_seq_gripper[:,1]
+        ], dim=0)
+        corners = ['static', 'gripper']
         
+        outputs = self.latent_motion_tokenizer(
+            cond_pixel_values1=cond1,
+            target_pixel_values1=target1,
+            cond_pixel_values2=cond2,
+            target_pixel_values2=target2,
+            corner=corners,
+            bs_per_gpu=self.bs_per_gpu
+        )
+        return outputs    
         
 
 

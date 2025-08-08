@@ -239,7 +239,7 @@ def main(cfg):
     rgb_preprocessor = get_rgb_preprocessor(**cfg['rgb_preprocessor_config'])
     
     # evaluate
-    eval_step = 500
+    eval_step = 3000
     
     ssim = SSIM_EVAL(
         latent_motion_tokenizer=latent_motion_tokenizer,

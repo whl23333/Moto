@@ -1,4 +1,4 @@
 data_type: "calvin"
-lmdb_dir: "/group/ycyang/yyang-infobai/lmdb_datasets/task_D_D/"
+lmdb_dir: "/group/ycyang/yyang-infobai/lmdb_datasets/task_ABC_D/"
 rgb_shape: [200, 200]
 skip_frame: 5
