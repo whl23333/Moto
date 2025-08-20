@@ -64,7 +64,7 @@ def main(cfg):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config_path', type=str, default="/home/yyang-infobai/Moto/latent_motion_tokenizer/configs/train/data_calvin.yaml")
+    parser.add_argument('--config_path', type=str, default="/home/yyang-infobai/Moto_multiview/latent_motion_tokenizer/configs/train/data_calvin.yaml")
     args = parser.parse_args()
 
     cfg = omegaconf.OmegaConf.load(args.config_path)

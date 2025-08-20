@@ -82,7 +82,7 @@ def main(cfg):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config_path', type=str, default="/home/yyang-infobai/Moto/moto_gpt/configs/train/data_calvin-model_actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5-train_lr0.0002_bs512-aug_shiftTrue_resizedCropFalse-resume_from_predLatentOnly_calvin_Epoch10.yaml")
+    parser.add_argument('--config_path', type=str, default="/home/yyang-infobai/Moto_multiview/moto_gpt/configs/train/data_calvin-model_actPredFalse_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5-train_lr0.0001_bs512-aug_shiftTrue_resizedCropFalse.yaml")
     args = parser.parse_args()
 
     cfg = omegaconf.OmegaConf.load(args.config_path)
