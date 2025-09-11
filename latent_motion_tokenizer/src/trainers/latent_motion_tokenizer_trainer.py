@@ -1265,6 +1265,8 @@ class LatentMotionTokenizer_Trainer_Multiview:
                             loss = self.calculate_paired_loss(batch, train=True)
                         elif self.paired_method == 'paired_half':
                             loss = self.calculate_paired_loss_half(batch, train=True)
+                        elif self.paired_method == '3d':
+                            loss = self.calculate_3d_loss(batch, train=True)
                         else:    
                             raise ValueError(f"Unknown paired_method: {self.paired_method}")
                     else:
@@ -1333,95 +1335,126 @@ class LatentMotionTokenizer_Trainer_Multiview:
 
         self.latent_motion_tokenizer.eval()
         if self.paired_loss:
-            cond1 = torch.cat([
-                rgb_seq_static[:,0],
-                rgb_seq_gripper[:,0],
-                rgb_seq_static[:,0],
-                rgb_seq_gripper[:,0]
-            ], dim=0)
-            target1 = torch.cat([
-                rgb_seq_static[:,1],
-                rgb_seq_gripper[:,1],
-                rgb_seq_static[:,1],
-                rgb_seq_gripper[:,1]
-            ], dim=0)
-            cond2 = torch.cat([
-                rgb_seq_static[:,0],
-                rgb_seq_gripper[:,0],
-                rgb_seq_gripper[:,0],
-                rgb_seq_static[:,0]
-            ], dim=0)
-            target2 = torch.cat([
-                rgb_seq_static[:,1],
-                rgb_seq_gripper[:,1],
-                rgb_seq_gripper[:,1],
-                rgb_seq_static[:,1]
-            ], dim=0)
-            corners = ['static', 'gripper', 'gripper', 'static']
-            
-            outputs = self.latent_motion_tokenizer(
-                cond_pixel_values1=cond1,
-                target_pixel_values1=target1,
-                cond_pixel_values2=cond2,
-                target_pixel_values2=target2,
-                return_recons_only=True,
-                corner=corners,
-                bs_per_gpu=self.bs_per_gpu
-            )
-            batch_size = rgb_seq_static.shape[0]
-            outputs_static = {k: v[:batch_size] for k, v in outputs.items()}
-            outputs_gripper = {k: v[batch_size:2*batch_size] for k, v in outputs.items()}
-            outputs_diff_corner1 = {k: v[2*batch_size:3*batch_size] for k, v in outputs.items()}
-            outputs_diff_corner2 = {k: v[3*batch_size:] for k, v in outputs.items()}
-            
-            
-            recons_rgb_future_static = self.rgb_preprocessor.post_process(outputs_static["recons_pixel_values"]).detach().cpu()
-            recons_rgb_future_diff_corner1 = self.rgb_preprocessor.post_process(outputs_diff_corner1["recons_pixel_values"]).detach().cpu()
-            recons_rgb_future_diff_corner2 = self.rgb_preprocessor.post_process(outputs_diff_corner2["recons_pixel_values"]).detach().cpu()
-            recons_rgb_future_gripper = self.rgb_preprocessor.post_process(outputs_gripper["recons_pixel_values"]).detach().cpu()
-            
-            gt_latent_motion_ids_static = outputs_static["indices"].detach().cpu()
-            gt_latent_motion_ids_diff_corner1 = outputs_diff_corner1["indices"].detach().cpu()
-            gt_latent_motion_ids_diff_corner2 = outputs_diff_corner2["indices"].detach().cpu()
-            gt_latent_motion_ids_gripper = outputs_gripper["indices"].detach().cpu()
-            
-            orig_rgb_seq_static = self.rgb_preprocessor.post_process(rgb_seq_static).detach().cpu()
-            orig_rgb_seq_gripper = self.rgb_preprocessor.post_process(rgb_seq_gripper).detach().cpu()
-            for i in range(orig_rgb_seq_static.shape[0]):
-                visualize_latent_motion_reconstruction(
-                    initial_frame=orig_rgb_seq_static[i,0],
-                    next_frame=orig_rgb_seq_static[i,1],
-                    recons_next_frame=recons_rgb_future_static[i],
-                    latent_motion_ids=gt_latent_motion_ids_static[i],
-                    path=os.path.join(visualization_dir, f"{self.process_index}-{i}-static.png")
+            if self.paired_method == '3d':
+                outputs = self.latent_motion_tokenizer(
+                    cond_pixel_values1=rgb_seq_static[:,0], # (b, c, h, w)
+                    target_pixel_values1=rgb_seq_static[:,1],
+                    cond_pixel_values2=rgb_seq_gripper[:,0],
+                    target_pixel_values2=rgb_seq_gripper[:,1],
+                    return_recons_only=True,
                 )
-            
-            for i in range(orig_rgb_seq_static.shape[0]):
-                visualize_latent_motion_reconstruction(
-                    initial_frame=orig_rgb_seq_gripper[i,0],
-                    next_frame=orig_rgb_seq_gripper[i,1],
-                    recons_next_frame=recons_rgb_future_diff_corner1[i],
-                    latent_motion_ids=gt_latent_motion_ids_diff_corner1[i],
-                    path=os.path.join(visualization_dir, f"{self.process_index}-{i}-diffcorner1.png")
-                )
-            
-            for i in range(orig_rgb_seq_static.shape[0]):
-                visualize_latent_motion_reconstruction(
-                    initial_frame=orig_rgb_seq_static[i,0],
-                    next_frame=orig_rgb_seq_static[i,1],
-                    recons_next_frame=recons_rgb_future_diff_corner2[i],
-                    latent_motion_ids=gt_latent_motion_ids_diff_corner2[i],
-                    path=os.path.join(visualization_dir, f"{self.process_index}-{i}-diffcorner2.png")
-                )
+                recons_rgb_future_static = self.rgb_preprocessor.post_process(outputs["recons_pixel_values1"]).detach().cpu()
+                recons_rgb_future_gripper = self.rgb_preprocessor.post_process(outputs["recons_pixel_values2"]).detach().cpu()
+                gt_latent_motion_ids = outputs["indices"].detach().cpu()
+                orig_rgb_seq_static = self.rgb_preprocessor.post_process(rgb_seq_static).detach().cpu()
+                orig_rgb_seq_gripper = self.rgb_preprocessor.post_process(rgb_seq_gripper).detach().cpu()
+                for i in range(orig_rgb_seq_static.shape[0]):
+                    visualize_latent_motion_reconstruction(
+                        initial_frame=orig_rgb_seq_static[i,0],
+                        next_frame=orig_rgb_seq_static[i,1],
+                        recons_next_frame=recons_rgb_future_static[i],
+                        latent_motion_ids=gt_latent_motion_ids[i],
+                        path=os.path.join(visualization_dir, f"{self.process_index}-{i}-static.png")
+                    )
+                for i in range(orig_rgb_seq_gripper.shape[0]):
+                    visualize_latent_motion_reconstruction(
+                        initial_frame=orig_rgb_seq_gripper[i,0],
+                        next_frame=orig_rgb_seq_gripper[i,1],
+                        recons_next_frame=recons_rgb_future_gripper[i],
+                        latent_motion_ids=gt_latent_motion_ids[i],
+                        path=os.path.join(visualization_dir, f"{self.process_index}-{i}-gripper.png")
+                    )
+            else:
                 
-            for i in range(orig_rgb_seq_static.shape[0]):
-                visualize_latent_motion_reconstruction(
-                    initial_frame=orig_rgb_seq_gripper[i,0],
-                    next_frame=orig_rgb_seq_gripper[i,1],
-                    recons_next_frame=recons_rgb_future_gripper[i],
-                    latent_motion_ids=gt_latent_motion_ids_gripper[i],
-                    path=os.path.join(visualization_dir, f"{self.process_index}-{i}-gripper.png")
+                cond1 = torch.cat([
+                    rgb_seq_static[:,0],
+                    rgb_seq_gripper[:,0],
+                    rgb_seq_static[:,0],
+                    rgb_seq_gripper[:,0]
+                ], dim=0)
+                target1 = torch.cat([
+                    rgb_seq_static[:,1],
+                    rgb_seq_gripper[:,1],
+                    rgb_seq_static[:,1],
+                    rgb_seq_gripper[:,1]
+                ], dim=0)
+                cond2 = torch.cat([
+                    rgb_seq_static[:,0],
+                    rgb_seq_gripper[:,0],
+                    rgb_seq_gripper[:,0],
+                    rgb_seq_static[:,0]
+                ], dim=0)
+                target2 = torch.cat([
+                    rgb_seq_static[:,1],
+                    rgb_seq_gripper[:,1],
+                    rgb_seq_gripper[:,1],
+                    rgb_seq_static[:,1]
+                ], dim=0)
+                corners = ['static', 'gripper', 'gripper', 'static']
+                
+                outputs = self.latent_motion_tokenizer(
+                    cond_pixel_values1=cond1,
+                    target_pixel_values1=target1,
+                    cond_pixel_values2=cond2,
+                    target_pixel_values2=target2,
+                    return_recons_only=True,
+                    corner=corners,
+                    bs_per_gpu=self.bs_per_gpu
                 )
+                batch_size = rgb_seq_static.shape[0]
+                outputs_static = {k: v[:batch_size] for k, v in outputs.items()}
+                outputs_gripper = {k: v[batch_size:2*batch_size] for k, v in outputs.items()}
+                outputs_diff_corner1 = {k: v[2*batch_size:3*batch_size] for k, v in outputs.items()}
+                outputs_diff_corner2 = {k: v[3*batch_size:] for k, v in outputs.items()}
+                
+                
+                recons_rgb_future_static = self.rgb_preprocessor.post_process(outputs_static["recons_pixel_values"]).detach().cpu()
+                recons_rgb_future_diff_corner1 = self.rgb_preprocessor.post_process(outputs_diff_corner1["recons_pixel_values"]).detach().cpu()
+                recons_rgb_future_diff_corner2 = self.rgb_preprocessor.post_process(outputs_diff_corner2["recons_pixel_values"]).detach().cpu()
+                recons_rgb_future_gripper = self.rgb_preprocessor.post_process(outputs_gripper["recons_pixel_values"]).detach().cpu()
+                
+                gt_latent_motion_ids_static = outputs_static["indices"].detach().cpu()
+                gt_latent_motion_ids_diff_corner1 = outputs_diff_corner1["indices"].detach().cpu()
+                gt_latent_motion_ids_diff_corner2 = outputs_diff_corner2["indices"].detach().cpu()
+                gt_latent_motion_ids_gripper = outputs_gripper["indices"].detach().cpu()
+                
+                orig_rgb_seq_static = self.rgb_preprocessor.post_process(rgb_seq_static).detach().cpu()
+                orig_rgb_seq_gripper = self.rgb_preprocessor.post_process(rgb_seq_gripper).detach().cpu()
+                for i in range(orig_rgb_seq_static.shape[0]):
+                    visualize_latent_motion_reconstruction(
+                        initial_frame=orig_rgb_seq_static[i,0],
+                        next_frame=orig_rgb_seq_static[i,1],
+                        recons_next_frame=recons_rgb_future_static[i],
+                        latent_motion_ids=gt_latent_motion_ids_static[i],
+                        path=os.path.join(visualization_dir, f"{self.process_index}-{i}-static.png")
+                    )
+                
+                for i in range(orig_rgb_seq_static.shape[0]):
+                    visualize_latent_motion_reconstruction(
+                        initial_frame=orig_rgb_seq_gripper[i,0],
+                        next_frame=orig_rgb_seq_gripper[i,1],
+                        recons_next_frame=recons_rgb_future_diff_corner1[i],
+                        latent_motion_ids=gt_latent_motion_ids_diff_corner1[i],
+                        path=os.path.join(visualization_dir, f"{self.process_index}-{i}-diffcorner1.png")
+                    )
+                
+                for i in range(orig_rgb_seq_static.shape[0]):
+                    visualize_latent_motion_reconstruction(
+                        initial_frame=orig_rgb_seq_static[i,0],
+                        next_frame=orig_rgb_seq_static[i,1],
+                        recons_next_frame=recons_rgb_future_diff_corner2[i],
+                        latent_motion_ids=gt_latent_motion_ids_diff_corner2[i],
+                        path=os.path.join(visualization_dir, f"{self.process_index}-{i}-diffcorner2.png")
+                    )
+                    
+                for i in range(orig_rgb_seq_static.shape[0]):
+                    visualize_latent_motion_reconstruction(
+                        initial_frame=orig_rgb_seq_gripper[i,0],
+                        next_frame=orig_rgb_seq_gripper[i,1],
+                        recons_next_frame=recons_rgb_future_gripper[i],
+                        latent_motion_ids=gt_latent_motion_ids_gripper[i],
+                        path=os.path.join(visualization_dir, f"{self.process_index}-{i}-gripper.png")
+                    )
                 
         else:
             cond = torch.cat([
@@ -1492,6 +1525,20 @@ class LatentMotionTokenizer_Trainer_Multiview:
             target_pixel_values=target,
             corner=corners,
             bs_per_gpu=self.bs_per_gpu,
+        )
+        
+        return outputs
+    
+    def calculate_3d_loss(self, batch, train):
+        rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1)
+        rgb_seq_static = self.rgb_preprocessor(rgb_seq_static, train=train)
+        rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1)
+        rgb_seq_gripper = self.rgb_preprocessor(rgb_seq_gripper, train=train)
+        outputs = self.latent_motion_tokenizer(
+            cond_pixel_values1=rgb_seq_static[:,0],
+            target_pixel_values1=rgb_seq_static[:,1],
+            cond_pixel_values2=rgb_seq_gripper[:,0],
+            target_pixel_values2=rgb_seq_gripper[:,1],
         )
         
         return outputs
@@ -1582,7 +1629,7 @@ class LatentMotionTokenizer_Trainer_Multiview:
         lm2 = outputs['latent_motion_embeddings'][bs:2*bs]
         lm_restrict = F.mse_loss(lm1, lm2)* weight
         outputs.pop('latent_motion_embeddings')
-        print(outputs['loss'], lm_restrict)
+        # print(outputs['loss'], lm_restrict)
         outputs['lm_restrict'] = lm_restrict
         outputs['loss'] += lm_restrict
         return outputs

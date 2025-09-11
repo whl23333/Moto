@@ -1,6 +1,6 @@
 data_type: "video_npz_multiview"
 # data_type: "video_npz"
-npz_dir: "/group/ycyang/yyang-infobai/task_ABC_D/" 
+npz_dir: "/group/ycyang/yyang-infobai/task_D_D/" 
 rgb_shape_static: [200, 200]
 rgb_shape_gripper: [84, 84]
 # rgb_shape: [200, 200]

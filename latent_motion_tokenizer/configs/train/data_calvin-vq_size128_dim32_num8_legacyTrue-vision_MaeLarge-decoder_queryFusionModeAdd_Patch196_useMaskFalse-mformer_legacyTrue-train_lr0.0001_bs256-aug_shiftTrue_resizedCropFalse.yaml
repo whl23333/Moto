@@ -1,5 +1,5 @@
-latent_motion_tokenizer_config_path: "/home/yyang-infobai/Moto/latent_motion_tokenizer/configs/models/model_for_calvin.yaml"
-dataset_config_path: "/home/yyang-infobai/Moto/latent_motion_tokenizer/configs/data/calvin.yaml"
+latent_motion_tokenizer_config_path: "/home/yyang-infobai/Moto_multiview/latent_motion_tokenizer/configs/models/model_for_calvin.yaml"
+dataset_config_path: "/home/yyang-infobai/Moto_multiview/latent_motion_tokenizer/configs/data/calvin.yaml"
 dataloader_config:
   bs_per_gpu: 64
   workers_per_gpu: 7
@@ -18,5 +18,5 @@ training_config:
   gradient_accumulation_steps: 2
   save_epochs: 1
   save_steps: 1000
-  save_path: "/home/yyang-infobai/Moto/latent_motion_tokenizer/outputs/calvin/origin_b64_gpu4_calvin_ABC_D/"
+  save_path: "/home/yyang-infobai/Moto_multiview/latent_motion_tokenizer/outputs/calvin/origin_b64_gpu2_calvin_ABC_D/"
   resume_ckpt_path: null

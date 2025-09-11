@@ -17,7 +17,10 @@ from common.data.data_utils import load_dataset
 def main(cfg):
     # Prepare Latent Motion Tokenizer
     if cfg['paired_loss']:
-        latent_motion_tokenizer_config_path = cfg['paired_latent_motion_tokenizer_config_path']
+        if cfg['training_config']['paired_method'] == "3d":
+            latent_motion_tokenizer_config_path = cfg['latent_motion_tokenizer_3d_config_path']
+        else:
+            latent_motion_tokenizer_config_path = cfg['paired_latent_motion_tokenizer_config_path']
     else:
         latent_motion_tokenizer_config_path = cfg['not_paired_latent_motion_tokenizer_config_path']
     print(f"initializing Latent Motion Tokenizer from {latent_motion_tokenizer_config_path} ...")
@@ -64,7 +67,7 @@ def main(cfg):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config_path', type=str, default="/home/yyang-infobai/Moto_multiview/latent_motion_tokenizer/configs/train/data_calvin.yaml")
+    parser.add_argument('--config_path', type=str, default="/home/yyang-infobai/Moto_multiview/latent_motion_tokenizer/configs/train/data_calvin_3d.yaml")
     args = parser.parse_args()
 
     cfg = omegaconf.OmegaConf.load(args.config_path)
