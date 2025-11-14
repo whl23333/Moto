@@ -17,6 +17,7 @@ import shutil
 from collections import defaultdict
 from latent_motion_tokenizer.src.trainers.optimizer import get_optimizer, LinearWarmup_CosineAnnealing
 from contextlib import contextmanager
+import wandb
 
 def cycle(dl):
     while True:
@@ -1226,6 +1227,12 @@ class LatentMotionTokenizer_Trainer_Multiview:
     def train(self):
         eval_loss_steps = len(self.train_prefetcher) // len(self.eval_prefetcher)
         step = 0
+        self.accelerator.print(
+            f"Accelerate world size: {self.accelerator.num_processes} (GPUs), "
+            f"process_index: {self.accelerator.process_index}, "
+            f"local_process_index: {self.accelerator.local_process_index}, "
+            f"device: {self.accelerator.device}"
+        )
         
         for epoch in range(self.num_epochs+1):
             if epoch != 0:
@@ -1295,6 +1302,7 @@ class LatentMotionTokenizer_Trainer_Multiview:
                             eval_log_loss[key] = loss[key].detach()
 
                     self.log(log_loss, eval_log_loss, cum_load_time, clock, epoch, batch_idx, step)
+                    wandb.log({"Epoch": epoch, "Step": step, "loss": log_loss, "num_processes": self.accelerator.num_processes})
                     log_loss = {}
                     eval_log_loss = {}
 

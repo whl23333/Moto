@@ -353,3 +353,50 @@ class MFormer3D(ViTPreTrainedModel):
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
         )
+
+class SymmetricCrossAttention(nn.Module):
+    def __init__(self, dim, dropout=0.0, batch_first=True, fuse='mean'):
+        """
+        fuse: 'mean' | 'concat' | 'gate'
+          - mean: 直接 (attn_ab + attn_ba)/2
+          - concat: 拼接后线性还原
+          - gate: 学习一个标量或向量做加权
+        """
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=1, dropout=dropout, batch_first=batch_first)
+        self.fuse = fuse
+        if fuse == 'concat':
+            self.proj = nn.Linear(2*dim, dim)
+        elif fuse == 'gate':
+            self.gate = nn.Sequential(
+                nn.Linear(2*dim, dim),
+                nn.GELU(),
+                nn.Linear(dim, dim),
+                nn.Sigmoid()
+            )
+        self.ln_out = nn.LayerNorm(dim)
+
+    def forward(self, a, b, mask_a=None, mask_b=None):
+        """
+        a, b: (B, T, D)
+        mask_*: (B, T) 可选，True 为需要忽略的位置（与 MultiheadAttention 的 key_padding_mask 语义一致）
+        """
+        # A 作为 query，B 作为 key,value
+        attn_ab, _ = self.attn(query=a, key=b, value=b, key_padding_mask=mask_b)
+        # B 作为 query，A 作为 key,value
+        attn_ba, _ = self.attn(query=b, key=a, value=a, key_padding_mask=mask_a)
+
+        if self.fuse == 'mean':
+            y = 0.5 * (attn_ab + attn_ba)
+        elif self.fuse == 'concat':
+            y = torch.cat([attn_ab, attn_ba], dim=-1)
+            y = self.proj(y)
+        elif self.fuse == 'gate':
+            g = self.gate(torch.cat([attn_ab, attn_ba], dim=-1))   # (B,T,D) 逐通道门控
+            y = g * attn_ab + (1 - g) * attn_ba
+        else:
+            raise ValueError(f"Unknown fuse mode {self.fuse}")
+
+        # 加一个残差稳定训练（可选）
+        y = self.ln_out(y + 0.5 * (a + b))
+        return y

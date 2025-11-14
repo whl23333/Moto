@@ -13,6 +13,7 @@ from latent_motion_tokenizer.src.trainers.latent_motion_tokenizer_trainer import
 from torch.utils.data import DataLoader
 from functools import partial
 from common.data.data_utils import load_dataset
+import wandb
 
 def main(cfg):
     # Prepare Latent Motion Tokenizer
@@ -27,6 +28,12 @@ def main(cfg):
     latent_motion_tokenizer_config = omegaconf.OmegaConf.load(latent_motion_tokenizer_config_path)
     latent_motion_tokenizer = hydra.utils.instantiate(latent_motion_tokenizer_config)
     latent_motion_tokenizer.config = latent_motion_tokenizer_config
+
+    #wandb
+    wandb.init(
+        project="Moto_training",  # 替换为你的项目名称
+        name=latent_motion_tokenizer_config_path,         # 替换为你的运行名称（可选）
+    )
 
     # Prepare rgb_processor
     rgb_preprocessor = get_rgb_preprocessor(**cfg['rgb_preprocessor_config'])
@@ -67,7 +74,7 @@ def main(cfg):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config_path', type=str, default="/home/yyang-infobai/Moto_multiview/latent_motion_tokenizer/configs/train/data_calvin_3d.yaml")
+    parser.add_argument('--config_path', type=str, default="/data/250010208/whl/code/Moto/latent_motion_tokenizer/configs/train/data_calvin_3d.yaml")
     args = parser.parse_args()
 
     cfg = omegaconf.OmegaConf.load(args.config_path)
