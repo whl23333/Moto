@@ -44,11 +44,9 @@ class MotoGPT(nn.Module):
             pred_discrete_arm_action=False, # NOTE 2024/12/17: predict discrete arm actions for berkeley_fanuc_manipulation
             use_timestep_embedding=False,
             use_latent_motion_pos_embedding=False,
-            lang_embed_dim=None,
             **kwargs
     ):
         super().__init__()
-        self.lang_embed_dim = lang_embed_dim
         self.act_dim = act_dim
         self.sequence_length = sequence_length
         self.chunk_size = chunk_size
@@ -86,10 +84,7 @@ class MotoGPT(nn.Module):
         self.embed_condition = nn.Embedding(1, hidden_size)
 
         # Embedding function for languages
-        if self.lang_embed_dim is None:
-            self.embed_lang = torch.nn.Linear(self.lang_feat_dim, hidden_size)
-        else:
-            self.embed_lang = torch.nn.Linear(self.lang_embed_dim, hidden_size)
+        self.embed_lang = torch.nn.Linear(self.lang_feat_dim, hidden_size)
 
         # Embedding function for vision
         self.embed_img = torch.nn.Linear(self.img_feat_dim, hidden_size)
@@ -108,7 +103,8 @@ class MotoGPT(nn.Module):
         self.use_latent_motion_pos_embedding = use_latent_motion_pos_embedding
         # print(f"use_latent_motion_pos_embedding: {self.use_latent_motion_pos_embedding}")
         if self.use_latent_motion_pos_embedding:
-            self.embed_latent_motion_pos = nn.Embedding(per_latent_motion_len+1, hidden_size)
+            print(f"use_latent_motion_pos_embedding: {self.use_latent_motion_pos_embedding}")
+            self.embed_latent_motion_pos = nn.Embedding((per_latent_motion_len+1)*sequence_length, hidden_size)
 
         # Layer norm
         self.embed_ln = nn.LayerNorm(hidden_size)
@@ -168,15 +164,12 @@ class MotoGPT(nn.Module):
         
 
         # Embed language
-        if self.lang_embed_dim is None:
-            if self.freeze_lang:
-                with torch.no_grad():
-                    lang_embeddings = self.model_lang(input_ids=language, attention_mask=lang_attention_mask).last_hidden_state
-            else:
+        if self.freeze_lang:
+            with torch.no_grad():
                 lang_embeddings = self.model_lang(input_ids=language, attention_mask=lang_attention_mask).last_hidden_state
-            lang_embeddings = self.embed_lang(lang_embeddings.float())  # (b, n_lang_tokens, h)
         else:
-            lang_embeddings = self.embed_lang(language)  # (b, n_lang_tokens, h)
+            lang_embeddings = self.model_lang(input_ids=language, attention_mask=lang_attention_mask).last_hidden_state
+        lang_embeddings = self.embed_lang(lang_embeddings.float())  # (b, n_lang_tokens, h)
 
         # Get obs and patch feature from Visual Encoder
         if self.freeze_vision:
@@ -214,6 +207,7 @@ class MotoGPT(nn.Module):
 
             if self.use_latent_motion_pos_embedding:
                 latent_motion_pos_embeddings = self.embed_latent_motion_pos.weight # (per_latent_motion_len+1, h)
+                latent_motion_pos_embeddings = latent_motion_pos_embeddings.reshape(sequence_length, -1, latent_motion_pos_embeddings.shape[-1])
                 act_stacked_inputs = act_stacked_inputs + latent_motion_pos_embeddings
         else:
             act_stacked_inputs = torch.tensor([]).to(rgb.device)
@@ -398,7 +392,7 @@ class MotoGPT(nn.Module):
             cur_pred_latent_motion_embeddings = self.embed_latent_motion(cur_pred_latent_motion_ids) # (b, t, h) or  # (b, h)
 
             if self.use_latent_motion_pos_embedding:
-                cur_latent_motion_pos_embedding = self.embed_latent_motion_pos.weight[j+1] # (h,)
+                cur_latent_motion_pos_embedding = self.embed_latent_motion_pos.weight[(buffer_len-1)*(self.per_latent_motion_len+1) + j+1] # (h,)
                 cur_pred_latent_motion_embeddings += cur_latent_motion_pos_embedding
 
             if self.use_timestep_embedding:
@@ -500,7 +494,7 @@ class MotoGPT(nn.Module):
             cur_pred_latent_motion_embeddings = self.embed_latent_motion(latent_motion_id_preds[:, :, j])  # (b, beam_size, h)
 
             if self.use_latent_motion_pos_embedding:
-                cur_latent_motion_pos_embedding = self.embed_latent_motion_pos.weight[j+1] # (h,)
+                cur_latent_motion_pos_embedding = self.embed_latent_motion_pos.weight[(buffer_len-1)*(self.per_latent_motion_len+1) + j+1] # (h,)
                 cur_pred_latent_motion_embeddings += cur_latent_motion_pos_embedding
 
             if self.use_timestep_embedding:

@@ -9,6 +9,8 @@ from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from torch.utils.tensorboard import SummaryWriter
 import torch
+import numpy as np
+import random
 from common.data.datasets import DataPrefetcher
 from latent_motion_tokenizer.src.trainers.trainer_utils import visualize_latent_motion_reconstruction
 import omegaconf
@@ -42,11 +44,10 @@ class LatentMotionTokenizer_Trainer:
         bs_per_gpu=32,
         max_epoch=None,
     ):
-        if resume_ckpt_path is not None:
-            print(f"resuming Latent Motion Tokenizer from {resume_ckpt_path} ...")
-            missing_keys, unexpected_keys = latent_motion_tokenizer.load_state_dict(torch.load(os.path.join(resume_ckpt_path, 'pytorch_model.bin'), map_location='cpu'), strict=False)
-            missing_root_keys = set([k.split(".")[0] for k in missing_keys])
-            print('load ', resume_ckpt_path, '\nmissing ', missing_root_keys, '\nunexpected ', unexpected_keys)
+        # Initialize training state variables
+        self.start_epoch = 0
+        self.start_step = 0
+        self.best_loss = float('inf')
         
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
         accelerator= Accelerator(
@@ -94,6 +95,10 @@ class LatentMotionTokenizer_Trainer:
         self.num_epochs = num_epochs
         self.print_steps = print_steps
         self.bs_per_gpu = bs_per_gpu
+
+        # Load checkpoint after all components are initialized
+        if resume_ckpt_path is not None:
+            self.load_checkpoint(resume_ckpt_path)
 
 
     @property
@@ -1197,7 +1202,6 @@ class LatentMotionTokenizer_Trainer_Multiview:
         self.lm_restrict_weight = lm_restrict_weight
         self.paired_method = paired_method
         print(f"paired method: {self.paired_method}, paired loss: {self.paired_loss}, lm_restrict_weight: {self.lm_restrict_weight}")
-        print(f"saved epochs: {self.save_epochs}, saved steps: {self.save_steps}")
 
 
     @property
@@ -1227,19 +1231,13 @@ class LatentMotionTokenizer_Trainer_Multiview:
     def train(self):
         eval_loss_steps = len(self.train_prefetcher) // len(self.eval_prefetcher)
         step = 0
-        self.accelerator.print(
-            f"Accelerate world size: {self.accelerator.num_processes} (GPUs), "
-            f"process_index: {self.accelerator.process_index}, "
-            f"local_process_index: {self.accelerator.local_process_index}, "
-            f"device: {self.accelerator.device}"
-        )
         
         for epoch in range(self.num_epochs+1):
             if epoch != 0:
                 self.accelerator.wait_for_everyone()
                 save_dir = os.path.join(self.save_path, f'saved_epoch_{epoch}_step_{step}')
 
-                if self.is_main and epoch % self.save_epochs == 0:
+                if self.is_main:
                     os.makedirs(save_dir, exist_ok=True)
                     self.save_checkpoint(save_dir)
                     
@@ -1294,15 +1292,7 @@ class LatentMotionTokenizer_Trainer_Multiview:
                         batch, _ = self.eval_prefetcher.next_without_none()
                         self.latent_motion_tokenizer.eval()
                         if self.paired_loss:
-                            if self.paired_method == 'lm_restrict':
-                                assert self.lm_restrict_weight is not None, "lm_restrict_weight must be set when paired_method is 'lm_restrict'"
-                                loss = self.calculate_paired_loss_lm_restrict(batch, train=True, weight=self.lm_restrict_weight)
-                            elif self.paired_method == 'paired':
-                                loss = self.calculate_paired_loss(batch, train=True)
-                            elif self.paired_method == 'paired_half':
-                                loss = self.calculate_paired_loss_half(batch, train=True)
-                            elif self.paired_method == '3d':
-                                loss = self.calculate_3d_loss(batch, train=True)
+                            loss = self.calculate_paired_loss(batch, train=True)
                         else:
                             loss = self.calculate_loss(batch, train=True)
 
@@ -1343,9 +1333,9 @@ class LatentMotionTokenizer_Trainer_Multiview:
         self.print(f"Saving visualization results to {visualization_dir} ...")
         batch, _ = self.eval_prefetcher.next_without_none()
 
-        orig_rgb_seq_static = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1) # (b, 2, c, h, w)
+        orig_rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1) # (b, 2, c, h, w)
         rgb_seq_static = self.rgb_preprocessor(orig_rgb_seq_static, train=True)
-        orig_rgb_seq_gripper = torch.cat([batch['rgb_initial_left'], batch['rgb_future_left']], dim=1) # (b, 2, c, h, w)
+        orig_rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1) # (b, 2, c, h, w)
         rgb_seq_gripper = self.rgb_preprocessor(orig_rgb_seq_gripper, train=True)
 
         self.latent_motion_tokenizer.eval()
@@ -1521,9 +1511,9 @@ class LatentMotionTokenizer_Trainer_Multiview:
 
     def calculate_loss(self, batch, train):
         # image preprocessing
-        rgb_seq_static = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1)
+        rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1)
         rgb_seq_static = self.rgb_preprocessor(rgb_seq_static, train=train)
-        rgb_seq_gripper = torch.cat([batch['rgb_initial_left'], batch['rgb_future_left']], dim=1)
+        rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1)
         rgb_seq_gripper = self.rgb_preprocessor(rgb_seq_gripper, train=train)
         cond = torch.cat([
             rgb_seq_static[:, 0],
@@ -1545,9 +1535,9 @@ class LatentMotionTokenizer_Trainer_Multiview:
         return outputs
     
     def calculate_3d_loss(self, batch, train):
-        rgb_seq_static = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1)
+        rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1)
         rgb_seq_static = self.rgb_preprocessor(rgb_seq_static, train=train)
-        rgb_seq_gripper = torch.cat([batch['rgb_initial_left'], batch['rgb_future_left']], dim=1)
+        rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1)
         rgb_seq_gripper = self.rgb_preprocessor(rgb_seq_gripper, train=train)
         outputs = self.latent_motion_tokenizer(
             cond_pixel_values1=rgb_seq_static[:,0],
@@ -1559,9 +1549,9 @@ class LatentMotionTokenizer_Trainer_Multiview:
         return outputs
 
     def calculate_paired_loss(self, batch, train):
-        rgb_seq_static = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1)
+        rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1)
         rgb_seq_static = self.rgb_preprocessor(rgb_seq_static, train=train)
-        rgb_seq_gripper = torch.cat([batch['rgb_initial_left'], batch['rgb_future_left']], dim=1)
+        rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1)
         rgb_seq_gripper = self.rgb_preprocessor(rgb_seq_gripper, train=train)
         cond1 = torch.cat([
             rgb_seq_static[:,0],

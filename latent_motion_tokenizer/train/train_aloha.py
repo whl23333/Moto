@@ -13,6 +13,8 @@ from latent_motion_tokenizer.src.trainers.latent_motion_tokenizer_trainer import
 from torch.utils.data import DataLoader
 from functools import partial
 from common.data.data_utils import load_dataset
+from common.data.hdf5_datasets import HDF5Dataset_for_MotoGPT_CALVINLike
+
 
 def main(cfg):
     # Prepare Latent Motion Tokenizer
@@ -38,7 +40,26 @@ def main(cfg):
         'do_extract_future_frames': True,
         'do_extract_action': False
     }
-    train_dataset, eval_dataset = load_dataset(dataset_config_path, extra_data_config)
+    dataset_config = omegaconf.OmegaConf.load(dataset_config_path)
+    # train_dataset, eval_dataset = load_dataset(dataset_config_path, extra_data_config)
+    train_dataset = HDF5Dataset_for_MotoGPT_CALVINLike(
+        hdf5_dir=dataset_config['hdf5_dir'],
+        split='train',
+        skip_frame=dataset_config['skip_frame'],
+        sequence_length=extra_data_config['sequence_length'],
+        do_extract_future_frames=extra_data_config['do_extract_future_frames'],
+        do_extract_action=extra_data_config['do_extract_action'],
+        rgb_shape=dataset_config['rgb_shape'],
+    )
+    eval_dataset = HDF5Dataset_for_MotoGPT_CALVINLike(
+        hdf5_dir=dataset_config['hdf5_dir'],
+        split='train',
+        skip_frame=dataset_config['skip_frame'],
+        sequence_length=extra_data_config['sequence_length'],
+        do_extract_future_frames=extra_data_config['do_extract_future_frames'],
+        do_extract_action=extra_data_config['do_extract_action'],
+        rgb_shape=dataset_config['rgb_shape'],
+    )
     dataloader_cls = partial(
         DataLoader, 
         pin_memory=True, # Accelerate data reading
@@ -67,7 +88,7 @@ def main(cfg):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config_path', type=str, default="/home/hlwang/Moto/latent_motion_tokenizer/configs/train/data_calvin_3d.yaml")
+    parser.add_argument('--config_path', type=str, default="/home/hlwang/Moto/latent_motion_tokenizer/configs/train/train_aloha.yaml")
     args = parser.parse_args()
 
     cfg = omegaconf.OmegaConf.load(args.config_path)
