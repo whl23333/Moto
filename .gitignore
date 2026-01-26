@@ -8,3 +8,4 @@ model_checkpoints
 **/output*
 **/eval_results*
 **/berkeley_fanuc_manipulation
+wandb/

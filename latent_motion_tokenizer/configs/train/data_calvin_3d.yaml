@@ -1,7 +1,7 @@
 paired_loss: true
 paired_latent_motion_tokenizer_config_path: "/data/250010208/whl/code/Moto/latent_motion_tokenizer/configs/models/model_for_calvin_paired.yaml"
 not_paired_latent_motion_tokenizer_config_path: "/data/250010208/whl/code/Moto/latent_motion_tokenizer/configs/models/model_for_calvin.yaml"
-latent_motion_tokenizer_3d_config_path: "/data/250010208/whl/code/Moto/latent_motion_tokenizer/configs/models/model_for_calvin_3d_simple.yaml"
+latent_motion_tokenizer_3d_config_path: "/data/250010208/whl/code/Moto/latent_motion_tokenizer/configs/models/model_for_calvin_3d_simple_sngl_dcdr.yaml"
 dataset_config_path: "/data/250010208/whl/code/Moto/latent_motion_tokenizer/configs/data/calvin_multiview.yaml"
 dataloader_config:
   # bs_per_gpu: 32
@@ -22,7 +22,7 @@ training_config:
   gradient_accumulation_steps: 2
   save_epochs: 1
   save_steps: 1000
-  save_path: "/data/250010208/whl/results/Moto/latent_motion_tokenizer/outputs/calvin/paired_b64_gpu4_calvinABC_D_3d_simple/"
+  save_path: "/data/250010208/whl/results/Moto/latent_motion_tokenizer/outputs/calvin/paired_b64_gpu4_calvinABCD_D_3d_simple_sngl_dcdr/"
   resume_ckpt_path: 
   paired_method: "3d"
   lm_restrict_weight: 0.5
