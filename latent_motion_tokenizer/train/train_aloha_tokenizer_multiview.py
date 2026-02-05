@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from functools import partial
 from common.data.data_utils import load_dataset
 from common.data.hdf5_datasets import HDF5Dataset_for_MotoGPT_CALVINLike
+import wandb
 
 
 def main(cfg):
@@ -30,6 +31,12 @@ def main(cfg):
     latent_motion_tokenizer = hydra.utils.instantiate(latent_motion_tokenizer_config)
     latent_motion_tokenizer.config = latent_motion_tokenizer_config
 
+    #wandb
+    wandb.init(
+        project="Moto_finetune_aloha",  # 替换为你的项目名称
+        name=cfg['training_config']['save_path'].split('/')[-2],         # 替换为你的运行名称（可选）
+    )
+
     # Prepare rgb_processor
     rgb_preprocessor = get_rgb_preprocessor(**cfg['rgb_preprocessor_config'])
 
@@ -38,7 +45,7 @@ def main(cfg):
     extra_data_config = {
         'sequence_length': 1,
         'do_extract_future_frames': True,
-        'do_extract_action': False
+        'do_extract_action': True
     }
     dataset_config = omegaconf.OmegaConf.load(dataset_config_path)
     # train_dataset, eval_dataset = load_dataset(dataset_config_path, extra_data_config)
@@ -50,15 +57,21 @@ def main(cfg):
         do_extract_future_frames=extra_data_config['do_extract_future_frames'],
         do_extract_action=extra_data_config['do_extract_action'],
         rgb_shape=dataset_config['rgb_shape'],
+        chunk_size=dataset_config.get('chunk_size', 5),
+        no_repeat_action=dataset_config.get('no_repeat_action', False),
+        constant_action_atol=dataset_config.get('constant_action_atol', 1e-6)
     )
     eval_dataset = HDF5Dataset_for_MotoGPT_CALVINLike(
         hdf5_dir=dataset_config['hdf5_dir'],
-        split='train',
+        split='val',
         skip_frame=dataset_config['skip_frame'],
         sequence_length=extra_data_config['sequence_length'],
         do_extract_future_frames=extra_data_config['do_extract_future_frames'],
         do_extract_action=extra_data_config['do_extract_action'],
         rgb_shape=dataset_config['rgb_shape'],
+        chunk_size=dataset_config.get('chunk_size', 5),
+        no_repeat_action=dataset_config.get('no_repeat_action', False),
+        constant_action_atol=dataset_config.get('constant_action_atol', 1e-6)
     )
     dataloader_cls = partial(
         DataLoader, 

@@ -25,6 +25,8 @@ class HDF5Dataset_for_MotoGPT_CALVINLike(Dataset):
         rgb_preprocessor=None,
         max_skip_frame=None,
         no_repeat_data=False,
+        no_repeat_action=False,
+        constant_action_atol=1e-6,
         camera_key="observations/images/cam_high",
         qpos_key="observations/qpos",
         camera_gripper_key="observations/images/cam_right_wrist",
@@ -44,6 +46,8 @@ class HDF5Dataset_for_MotoGPT_CALVINLike(Dataset):
         self.rgb_shape = rgb_shape
         self.rgb_preprocessor = rgb_preprocessor
         self.no_repeat_data = no_repeat_data
+        self.no_repeat_action = no_repeat_action
+        self.constant_action_atol = constant_action_atol
         self.debug = debug
         self.debug_sample_idx = debug_sample_idx
         self.max_attempts = max_attempts
@@ -297,14 +301,22 @@ class HDF5Dataset_for_MotoGPT_CALVINLike(Dataset):
                                 mask[i, j] = 1
                                 actions[i, j] = self._read_qpos_f(f, cur_idx)
 
+                if self.no_repeat_action and self.do_extract_action:
+                    if self._actions_are_constant(actions, mask):
+                        attempts += 1
+                        if self.dataset_len <= 0:
+                            raise
+                        idx = random.randint(0, self.dataset_len - 1)
+                        continue
+
                 if not self.no_repeat_data:
                     if self.do_extract_future_frames and (not self.do_extract_action) and latent_mask.sum() == 0:
                         raise RuntimeError("latent_mask should be larger than zero!")
 
                 return {
                     "lang": lang,
-                    "rgb_initial": rgb_initial,
-                    "rgb_future": rgb_future,
+                    "rgb_initial_static": rgb_initial,
+                    "rgb_future_static": rgb_future,
                     "rgb_initial_gripper": rgb_initial_gripper,
                     "rgb_future_gripper": rgb_future_gripper,
                     "rgb_initial_left": rgb_initial_left,
@@ -330,3 +342,14 @@ class HDF5Dataset_for_MotoGPT_CALVINLike(Dataset):
 
         # if we reach here, give up to avoid hanging
         raise RuntimeError(f"Failed to fetch sample after {self.max_attempts} attempts.")
+
+    def _actions_are_constant(self, actions, mask):
+        if actions.numel() == 0:
+            return True
+        valid_mask = mask > 0
+        if not valid_mask.any():
+            return True
+        valid_actions = actions[valid_mask]
+        reference = valid_actions[0]
+        deviation = torch.max(torch.abs(valid_actions - reference))
+        return deviation <= self.constant_action_atol

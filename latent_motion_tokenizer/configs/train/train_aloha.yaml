@@ -1,7 +1,7 @@
-latent_motion_tokenizer_config_path: "/home/hlwang/refined_moto/Moto/latent_motion_tokenizer/configs/models/vq_size128_dim32_num8_legacyTrue-vision_MaeLarge-decoder_queryFusionModeAdd_Patch196_useMaskFalse-mformer_legacyTrue.yaml"
-dataset_config_path: "/home/hlwang/refined_moto/Moto/latent_motion_tokenizer/configs/data/aloha.yaml"
+latent_motion_tokenizer_config_path: "/data/250010208/whl/code/Moto/latent_motion_tokenizer/configs/models/model_for_calvin.yaml"
+dataset_config_path: "/data/250010208/whl/code/Moto/latent_motion_tokenizer/configs/data/aloha.yaml"
 dataloader_config:
-  bs_per_gpu: 32
+  bs_per_gpu: 64
   workers_per_gpu: 7
   prefetch_factor: 2
 rgb_preprocessor_config: 
@@ -10,13 +10,14 @@ rgb_preprocessor_config:
     do_random_resized_crop: false
     do_random_shift: true
 training_config:
-  num_epochs: 50
+  num_epochs: 200
   num_warmup_epochs: 1
   print_steps: 20
   lr_max: 0.0001
   weight_decay: 0.0001
   gradient_accumulation_steps: 2
-  save_epochs: 1
-  save_steps: 100
-  save_path: "/home/hlwang/refined_moto/Moto/latent_motion_tokenizer/outputs/latent_motion_tokenizer_trained_on_aloha/"
-  resume_ckpt_path: null
+  save_epochs: 20
+  save_steps: 1000
+  save_path: "/data/250010208/whl/results/Moto/latent_motion_tokenizer/outputs/aloha/single_view_b64_gpu4_gripper_aloha/"
+  resume_ckpt_path: /data/250010208/whl/results/Moto/latent_motion_tokenizer/outputs/calvin/single_view_b64_gpu4_calvin_ABC_D_gripper/saved_epoch_16_step_112192/
+  finetune: true

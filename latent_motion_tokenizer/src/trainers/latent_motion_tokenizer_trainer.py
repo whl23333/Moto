@@ -8,21 +8,37 @@ from transformers import get_cosine_schedule_with_warmup
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from torch.utils.tensorboard import SummaryWriter
-import torch
+from torch.optim import Adam, AdamW
 from common.data.datasets import DataPrefetcher
 from latent_motion_tokenizer.src.trainers.trainer_utils import visualize_latent_motion_reconstruction
 import omegaconf
 from glob import glob
 import shutil
 from collections import defaultdict
-from latent_motion_tokenizer.src.trainers.optimizer import get_optimizer, LinearWarmup_CosineAnnealing
+from latent_motion_tokenizer.src.trainers.optimizer import (
+    get_optimizer,
+    LinearWarmup_CosineAnnealing,
+    separate_weight_decayable_params,
+)
 from contextlib import contextmanager
 import wandb
+from latent_motion_tokenizer.src.models.latent_motion_tokenizer import (
+    LatentMotionTokenizer3D_Simple_Sngl_Dcdr,
+    LatentMotionTokenizer
+)
 
 def cycle(dl):
     while True:
         for data in dl:
             yield data
+
+def crop_image(image, crop_left=80, crop_right=80):
+    width = image.shape[-1]
+    crop_start = crop_left
+    crop_end = width - crop_right
+    return image[..., crop_start:crop_end]
+
+
 class LatentMotionTokenizer_Trainer:
     def __init__(
         self,
@@ -42,6 +58,7 @@ class LatentMotionTokenizer_Trainer:
         resume_ckpt_path=None,
         bs_per_gpu=32,
         max_epoch=None,
+        finetune=False,
     ):
         if resume_ckpt_path is not None:
             print(f"resuming Latent Motion Tokenizer from {resume_ckpt_path} ...")
@@ -58,19 +75,92 @@ class LatentMotionTokenizer_Trainer:
 
         total_prints_per_epoch = len(train_dataloader.dataset) // (print_steps * bs_per_gpu * accelerator.num_processes)
 
-        optimizer = get_optimizer(
-                        [p for n, p in latent_motion_tokenizer.named_parameters() if p.requires_grad], 
-                        lr=lr_max, 
-                        wd=weight_decay
-                    )
+        model_parameters = [p for _, p in latent_motion_tokenizer.named_parameters() if p.requires_grad]
+        use_finetune_lrs = finetune and isinstance(latent_motion_tokenizer, LatentMotionTokenizer)
+
+        if use_finetune_lrs:
+            print("Using finetune learning rates for latent motion tokenizer")
+            low_lr_modules = [
+                getattr(latent_motion_tokenizer, "symmetric_cross_attention", None),
+                getattr(latent_motion_tokenizer, "vector_quantizer", None),
+                getattr(latent_motion_tokenizer, "vq_down_resampler", None),
+                getattr(latent_motion_tokenizer, "vq_up_resampler", None),
+            ]
+            low_lr_param_ids = set()
+            low_lr_params = []
+            for module in low_lr_modules:
+                if module is None:
+                    continue
+                for param in module.parameters():
+                    if not param.requires_grad or id(param) in low_lr_param_ids:
+                        continue
+                    low_lr_param_ids.add(id(param))
+                    low_lr_params.append(param)
+
+            base_params = [p for p in model_parameters if id(p) not in low_lr_param_ids]
+
+            def build_param_groups(param_list, lr_value):
+                groups = []
+                if not param_list:
+                    return groups
+                if weight_decay != 0:
+                    wd_params, no_wd_params = separate_weight_decayable_params(param_list)
+                    if wd_params:
+                        groups.append({
+                            "params": wd_params,
+                            "lr": lr_value,
+                            "weight_decay": weight_decay,
+                        })
+                    if no_wd_params:
+                        groups.append({
+                            "params": no_wd_params,
+                            "lr": lr_value,
+                            "weight_decay": 0.0,
+                        })
+                else:
+                    groups.append({
+                        "params": param_list,
+                        "lr": lr_value,
+                        "weight_decay": 0.0,
+                    })
+                return groups
+
+            optimizer_groups = []
+            optimizer_groups.extend(build_param_groups(base_params, lr_max))
+            optimizer_groups.extend(build_param_groups(low_lr_params, 1e-6))
+            optimizer_groups = [group for group in optimizer_groups if group.get("params")]
+
+            if weight_decay == 0:
+                optimizer = Adam(
+                    optimizer_groups,
+                    lr=lr_max,
+                    betas=(0.9, 0.99),
+                    eps=1e-8,
+                )
+            else:
+                optimizer = AdamW(
+                    optimizer_groups,
+                    lr=lr_max,
+                    weight_decay=0.0,
+                    betas=(0.9, 0.99),
+                    eps=1e-8,
+                )
+        else:
+            optimizer = get_optimizer(
+                            model_parameters,
+                            lr=lr_max,
+                            wd=weight_decay
+                        )
         
         linear_warmup_total_iters = min(num_warmup_epochs*total_prints_per_epoch, 5000000 // (print_steps * bs_per_gpu * accelerator.num_processes))
+        warmup_start_factor = 1e-4 if finetune else 0.5
+        cosine_eta_min = 5e-7 if finetune else 5e-5
         scheduler = LinearWarmup_CosineAnnealing(
                         optimizer=optimizer,
-                        linear_warmup_start_factor=0.5,
+                        linear_warmup_start_factor=warmup_start_factor,
                         linear_warmup_total_iters=linear_warmup_total_iters,
                         cosine_annealing_T_max=num_epochs*total_prints_per_epoch-linear_warmup_total_iters,
-                        cosine_annealing_eta_min=5e-5
+                        cosine_annealing_eta_min=cosine_eta_min
                     )
 
         latent_motion_tokenizer, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
@@ -95,6 +185,7 @@ class LatentMotionTokenizer_Trainer:
         self.num_epochs = num_epochs
         self.print_steps = print_steps
         self.bs_per_gpu = bs_per_gpu
+        self.finetune = finetune
 
 
     @property
@@ -130,12 +221,12 @@ class LatentMotionTokenizer_Trainer:
                 self.accelerator.wait_for_everyone()
                 save_dir = os.path.join(self.save_path, f'saved_epoch_{epoch}_step_{step}')
 
-                if self.is_main:
+                if self.is_main and (epoch % self.save_epochs == 0):
                     os.makedirs(save_dir, exist_ok=True)
                     self.save_checkpoint(save_dir)
                     
-                visualization_dir = os.path.join(save_dir, 'visualization')
-                self.eval_latent_motion_reconstruction(visualization_dir)
+                    visualization_dir = os.path.join(save_dir, 'visualization')
+                    self.eval_latent_motion_reconstruction(visualization_dir)
 
                 if epoch == self.num_epochs:
                     break
@@ -177,6 +268,27 @@ class LatentMotionTokenizer_Trainer:
                             eval_log_loss[key] = loss[key].detach()
 
                     self.log(log_loss, eval_log_loss, cum_load_time, clock, epoch, batch_idx, step)
+                    lr_metrics = {}
+                    current_lrs = self.scheduler.get_last_lr()
+                    if len(current_lrs) == 1:
+                        lr_metrics["learning_rate"] = float(current_lrs[0])
+                    else:
+                        for idx, lr_value in enumerate(current_lrs):
+                            lr_metrics[f"learning_rate/group_{idx}"] = float(lr_value)
+                    
+                    # log only in main process
+                    if self.is_main:
+                        wandb_payload = {
+                            "Epoch": epoch,
+                            "Step": step,
+                            "num_processes": self.accelerator.num_processes,
+                        }
+                        for key, value in log_loss.items():
+                            wandb_payload[key] = float(value)
+                        for key, value in eval_log_loss.items():
+                            wandb_payload[f"eval_{key}"] = float(value)
+                        wandb_payload.update(lr_metrics)
+                        wandb.log(wandb_payload)
                     log_loss = {}
                     eval_log_loss = {}
 
@@ -209,8 +321,15 @@ class LatentMotionTokenizer_Trainer:
         os.makedirs(visualization_dir, exist_ok=True)
         self.print(f"Saving visualization results to {visualization_dir} ...")
         batch, _ = self.eval_prefetcher.next_without_none()
-
-        orig_rgb_seq = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1) # (b, 2, c, h, w)
+        use_gripper = True
+        if use_gripper:
+            orig_rgb_seq = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1) # (b, 2, c, h, w)
+            if orig_rgb_seq.shape[-1] != orig_rgb_seq.shape[-2]:
+                orig_rgb_seq = crop_image(orig_rgb_seq, crop_left=80, crop_right=80)
+        else:
+            orig_rgb_seq = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1) # (b, 2, c, h, w)
+            if orig_rgb_seq.shape[-1] != orig_rgb_seq.shape[-2]:
+                orig_rgb_seq = crop_image(orig_rgb_seq, crop_left=120, crop_right=40)
         rgb_seq = self.rgb_preprocessor(orig_rgb_seq, train=True)
 
         self.latent_motion_tokenizer.eval()
@@ -237,7 +356,15 @@ class LatentMotionTokenizer_Trainer:
 
     def calculate_loss(self, batch, train):
         # image preprocessing
-        rgb_seq = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1)
+        use_gripper = True
+        if use_gripper:
+            rgb_seq = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1)
+            if rgb_seq.shape[-1] != rgb_seq.shape[-2]:
+                rgb_seq = crop_image(rgb_seq, crop_left=80, crop_right=80)
+        else:
+            rgb_seq = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1)
+            if rgb_seq.shape[-1] != rgb_seq.shape[-2]:
+                rgb_seq = crop_image(rgb_seq, crop_left=120, crop_right=40)
         rgb_seq = self.rgb_preprocessor(rgb_seq, train=train)
 
         # compute loss
@@ -258,6 +385,11 @@ class LatentMotionTokenizer_Trainer:
         load_pecnt = self.accelerator.gather_for_metrics(load_pecnt).mean()
         fps = (self.bs_per_gpu*self.print_steps*2) / (time()-clock)
         fps = self.accelerator.gather_for_metrics(torch.tensor(fps).to(self.device)).sum()
+        current_lrs = self.scheduler.get_last_lr()
+        if len(current_lrs) == 1:
+            lr_display = f"{current_lrs[0]:.6e}"
+        else:
+            lr_display = "[" + ", ".join(f"{lr:.6e}" for lr in current_lrs) + "]"
 
         text = 'Train Epoch: {} [{}/{} ({:.0f}%)] FPS:{:.5f} Load Pertentage:{:.5f} LR:{}'.format(
             epoch, 
@@ -266,7 +398,7 @@ class LatentMotionTokenizer_Trainer:
             100. * batch_idx * self.bs_per_gpu * self.accelerator.num_processes / len(self.train_prefetcher),
             fps,
             load_pecnt,
-            self.scheduler.get_last_lr()[0],
+            lr_display,
         )
         for key in log_loss:
             text = text + ' {}: {:.5f}'.format(key, log_loss[key])
@@ -278,7 +410,9 @@ class LatentMotionTokenizer_Trainer:
                 self.writer.add_scalar(key, log_loss[key], step)
             for key in eval_log_loss:
                 self.writer.add_scalar('eval_'+key, eval_log_loss[key], step)
-            self.writer.add_scalar("learning rate", self.scheduler.get_last_lr()[0], step)
+            for idx, lr_value in enumerate(current_lrs):
+                tag = "learning rate" if len(current_lrs) == 1 else f"learning rate/group_{idx}"
+                self.writer.add_scalar(tag, lr_value, step)
             self.writer.add_scalar("FPS", fps, step)
             self.writer.add_scalar("loading time in total time", load_pecnt, step)
 
@@ -1140,7 +1274,8 @@ class LatentMotionTokenizer_Trainer_Multiview:
         max_epoch=None,
         paired_loss = False,
         lm_restrict_weight=None,
-        paired_method = None
+        paired_method = None,
+        finetune=False,
     ):
         if resume_ckpt_path is not None:
             print(f"resuming Latent Motion Tokenizer from {resume_ckpt_path} ...")
@@ -1157,19 +1292,92 @@ class LatentMotionTokenizer_Trainer_Multiview:
 
         total_prints_per_epoch = len(train_dataloader.dataset) // (print_steps * bs_per_gpu * accelerator.num_processes)
 
-        optimizer = get_optimizer(
-                        [p for n, p in latent_motion_tokenizer.named_parameters() if p.requires_grad], 
-                        lr=lr_max, 
-                        wd=weight_decay
-                    )
+        model_parameters = [p for _, p in latent_motion_tokenizer.named_parameters() if p.requires_grad]
+        use_finetune_lrs = finetune and isinstance(latent_motion_tokenizer, LatentMotionTokenizer3D_Simple_Sngl_Dcdr)
+
+        if use_finetune_lrs:
+            print("Using finetune learning rates for latent motion tokenizer")
+            low_lr_modules = [
+                getattr(latent_motion_tokenizer, "symmetric_cross_attention", None),
+                getattr(latent_motion_tokenizer, "vector_quantizer", None),
+                getattr(latent_motion_tokenizer, "vq_down_resampler", None),
+                getattr(latent_motion_tokenizer, "vq_up_resampler", None),
+            ]
+            low_lr_param_ids = set()
+            low_lr_params = []
+            for module in low_lr_modules:
+                if module is None:
+                    continue
+                for param in module.parameters():
+                    if not param.requires_grad or id(param) in low_lr_param_ids:
+                        continue
+                    low_lr_param_ids.add(id(param))
+                    low_lr_params.append(param)
+
+            base_params = [p for p in model_parameters if id(p) not in low_lr_param_ids]
+
+            def build_param_groups(param_list, lr_value):
+                groups = []
+                if not param_list:
+                    return groups
+                if weight_decay != 0:
+                    wd_params, no_wd_params = separate_weight_decayable_params(param_list)
+                    if wd_params:
+                        groups.append({
+                            "params": wd_params,
+                            "lr": lr_value,
+                            "weight_decay": weight_decay,
+                        })
+                    if no_wd_params:
+                        groups.append({
+                            "params": no_wd_params,
+                            "lr": lr_value,
+                            "weight_decay": 0.0,
+                        })
+                else:
+                    groups.append({
+                        "params": param_list,
+                        "lr": lr_value,
+                        "weight_decay": 0.0,
+                    })
+                return groups
+
+            optimizer_groups = []
+            optimizer_groups.extend(build_param_groups(base_params, lr_max))
+            optimizer_groups.extend(build_param_groups(low_lr_params, 1e-6))
+            optimizer_groups = [group for group in optimizer_groups if group.get("params")]
+
+            if weight_decay == 0:
+                optimizer = Adam(
+                    optimizer_groups,
+                    lr=lr_max,
+                    betas=(0.9, 0.99),
+                    eps=1e-8,
+                )
+            else:
+                optimizer = AdamW(
+                    optimizer_groups,
+                    lr=lr_max,
+                    weight_decay=0.0,
+                    betas=(0.9, 0.99),
+                    eps=1e-8,
+                )
+        else:
+            optimizer = get_optimizer(
+                            model_parameters,
+                            lr=lr_max,
+                            wd=weight_decay
+                        )
         
         linear_warmup_total_iters = min(num_warmup_epochs*total_prints_per_epoch, 5000000 // (print_steps * bs_per_gpu * accelerator.num_processes))
+        warmup_start_factor = 1e-4 if finetune else 0.5
+        cosine_eta_min = 5e-7 if finetune else 5e-5
         scheduler = LinearWarmup_CosineAnnealing(
                         optimizer=optimizer,
-                        linear_warmup_start_factor=0.5,
+                        linear_warmup_start_factor=warmup_start_factor,
                         linear_warmup_total_iters=linear_warmup_total_iters,
                         cosine_annealing_T_max=num_epochs*total_prints_per_epoch-linear_warmup_total_iters,
-                        cosine_annealing_eta_min=5e-5
+                        cosine_annealing_eta_min=cosine_eta_min
                     )
 
         latent_motion_tokenizer, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
@@ -1197,6 +1405,7 @@ class LatentMotionTokenizer_Trainer_Multiview:
         self.paired_loss = paired_loss
         self.lm_restrict_weight = lm_restrict_weight
         self.paired_method = paired_method
+        self.finetune = finetune
         print(f"paired method: {self.paired_method}, paired loss: {self.paired_loss}, lm_restrict_weight: {self.lm_restrict_weight}")
 
 
@@ -1239,12 +1448,12 @@ class LatentMotionTokenizer_Trainer_Multiview:
                 self.accelerator.wait_for_everyone()
                 save_dir = os.path.join(self.save_path, f'saved_epoch_{epoch}_step_{step}')
 
-                if self.is_main:
+                if self.is_main and (epoch % self.save_epochs == 0):
                     os.makedirs(save_dir, exist_ok=True)
                     self.save_checkpoint(save_dir)
                     
-                visualization_dir = os.path.join(save_dir, 'visualization')
-                self.eval_latent_motion_reconstruction(visualization_dir)
+                    visualization_dir = os.path.join(save_dir, 'visualization')
+                    self.eval_latent_motion_reconstruction(visualization_dir)
 
                 if epoch == self.num_epochs:
                     break
@@ -1302,7 +1511,26 @@ class LatentMotionTokenizer_Trainer_Multiview:
                             eval_log_loss[key] = loss[key].detach()
 
                     self.log(log_loss, eval_log_loss, cum_load_time, clock, epoch, batch_idx, step)
-                    wandb.log({"Epoch": epoch, "Step": step, "loss": log_loss, "num_processes": self.accelerator.num_processes})
+                    lr_metrics = {}
+                    current_lrs = self.scheduler.get_last_lr()
+                    if len(current_lrs) == 1:
+                        lr_metrics["learning_rate"] = float(current_lrs[0])
+                    else:
+                        for idx, lr_value in enumerate(current_lrs):
+                            lr_metrics[f"learning_rate/group_{idx}"] = float(lr_value)
+
+                    if self.is_main:
+                        wandb_payload = {
+                            "Epoch": epoch,
+                            "Step": step,
+                            "num_processes": self.accelerator.num_processes,
+                        }
+                        for key, value in log_loss.items():
+                            wandb_payload[key] = float(value)
+                        for key, value in eval_log_loss.items():
+                            wandb_payload[f"eval_{key}"] = float(value)
+                        wandb_payload.update(lr_metrics)
+                        wandb.log(wandb_payload)
                     log_loss = {}
                     eval_log_loss = {}
 
@@ -1336,10 +1564,23 @@ class LatentMotionTokenizer_Trainer_Multiview:
         self.print(f"Saving visualization results to {visualization_dir} ...")
         batch, _ = self.eval_prefetcher.next_without_none()
 
-        orig_rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1) # (b, 2, c, h, w)
-        rgb_seq_static = self.rgb_preprocessor(orig_rgb_seq_static, train=True)
-        orig_rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1) # (b, 2, c, h, w)
-        rgb_seq_gripper = self.rgb_preprocessor(orig_rgb_seq_gripper, train=True)
+        # orig_rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1) # (b, 2, c, h, w)
+        # rgb_seq_static = self.rgb_preprocessor(orig_rgb_seq_static, train=True)
+        # orig_rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1) # (b, 2, c, h, w)
+        # rgb_seq_gripper = self.rgb_preprocessor(orig_rgb_seq_gripper, train=True)
+        
+        orig_rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1)
+        if orig_rgb_seq_static.shape[-1] != orig_rgb_seq_static.shape[-2]:
+            orig_rgb_seq_static = crop_image(orig_rgb_seq_static, crop_left=120, crop_right=40)
+        # orig_rgb_seq_static = self.rgb_preprocessor(orig_rgb_seq_static, train=train)
+        orig_rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1)
+        if orig_rgb_seq_gripper.shape[-1] != orig_rgb_seq_gripper.shape[-2]:
+            orig_rgb_seq_gripper = crop_image(orig_rgb_seq_gripper, crop_left=80, crop_right=80)
+        # orig_rgb_seq_gripper = self.rgb_preprocessor(orig_rgb_seq_gripper, train=train)
+        rgb_seq = torch.cat([orig_rgb_seq_static, orig_rgb_seq_gripper], dim=0)
+        rgb_seq = self.rgb_preprocessor(rgb_seq, train=True)
+        rgb_seq_static = rgb_seq[:orig_rgb_seq_static.shape[0]]
+        rgb_seq_gripper = rgb_seq[orig_rgb_seq_static.shape[0]:]
 
         self.latent_motion_tokenizer.eval()
         if self.paired_loss:
@@ -1539,9 +1780,17 @@ class LatentMotionTokenizer_Trainer_Multiview:
     
     def calculate_3d_loss(self, batch, train):
         rgb_seq_static = torch.cat([batch['rgb_initial_static'], batch['rgb_future_static']], dim=1)
-        rgb_seq_static = self.rgb_preprocessor(rgb_seq_static, train=train)
+        if rgb_seq_static.shape[-1] != rgb_seq_static.shape[-2]:
+            rgb_seq_static = crop_image(rgb_seq_static, crop_left=120, crop_right=40)
+        # rgb_seq_static = self.rgb_preprocessor(rgb_seq_static, train=train)
         rgb_seq_gripper = torch.cat([batch['rgb_initial_gripper'], batch['rgb_future_gripper']], dim=1)
-        rgb_seq_gripper = self.rgb_preprocessor(rgb_seq_gripper, train=train)
+        if rgb_seq_gripper.shape[-1] != rgb_seq_gripper.shape[-2]:
+            rgb_seq_gripper = crop_image(rgb_seq_gripper, crop_left=80, crop_right=80)
+        # rgb_seq_gripper = self.rgb_preprocessor(rgb_seq_gripper, train=train)
+        rgb_seq = torch.cat([rgb_seq_static, rgb_seq_gripper], dim=0)
+        rgb_seq = self.rgb_preprocessor(rgb_seq, train=train)
+        rgb_seq_static = rgb_seq[:rgb_seq_static.shape[0]]
+        rgb_seq_gripper = rgb_seq[rgb_seq_static.shape[0]:]
         outputs = self.latent_motion_tokenizer(
             cond_pixel_values1=rgb_seq_static[:,0],
             target_pixel_values1=rgb_seq_static[:,1],
@@ -1687,6 +1936,11 @@ class LatentMotionTokenizer_Trainer_Multiview:
         load_pecnt = self.accelerator.gather_for_metrics(load_pecnt).mean()
         fps = (self.bs_per_gpu*self.print_steps*2) / (time()-clock)
         fps = self.accelerator.gather_for_metrics(torch.tensor(fps).to(self.device)).sum()
+        current_lrs = self.scheduler.get_last_lr()
+        if len(current_lrs) == 1:
+            lr_display = f"{current_lrs[0]:.6e}"
+        else:
+            lr_display = "[" + ", ".join(f"{lr:.6e}" for lr in current_lrs) + "]"
 
         text = 'Train Epoch: {} [{}/{} ({:.0f}%)] FPS:{:.5f} Load Pertentage:{:.5f} LR:{}'.format(
             epoch, 
@@ -1695,7 +1949,7 @@ class LatentMotionTokenizer_Trainer_Multiview:
             100. * batch_idx * self.bs_per_gpu * self.accelerator.num_processes / len(self.train_prefetcher),
             fps,
             load_pecnt,
-            self.scheduler.get_last_lr()[0],
+            lr_display,
         )
         for key in log_loss:
             text = text + ' {}: {:.5f}'.format(key, log_loss[key])
@@ -1707,6 +1961,8 @@ class LatentMotionTokenizer_Trainer_Multiview:
                 self.writer.add_scalar(key, log_loss[key], step)
             for key in eval_log_loss:
                 self.writer.add_scalar('eval_'+key, eval_log_loss[key], step)
-            self.writer.add_scalar("learning rate", self.scheduler.get_last_lr()[0], step)
+            for idx, lr_value in enumerate(current_lrs):
+                tag = "learning_rate" if len(current_lrs) == 1 else f"learning_rate/group_{idx}"
+                self.writer.add_scalar(tag, lr_value, step)
             self.writer.add_scalar("FPS", fps, step)
             self.writer.add_scalar("loading time in total time", load_pecnt, step)
