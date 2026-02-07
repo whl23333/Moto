@@ -6,9 +6,9 @@ perceptual_loss_w: 1.0
 use_optical_flow: false
 flow_checkpoint_path: "/home/yyang-infobai/Moto/unimatch/pretrained/gmflow-scale2-regrefine6-mixdata-train320x576-4e7b215d.pth"
 
-image_encoder:
-  _target_: transformers.ViTMAEModel.from_pretrained
-  pretrained_model_name_or_path: "/home/yyang-infobai/.cache/huggingface/hub/models--facebook--vit-mae-large/snapshots/142cb8c25e1b1bc1769997a919aa1b5a2345a6b8"
+# image_encoder:
+#   _target_: transformers.ViTMAEModel.from_pretrained
+#   pretrained_model_name_or_path: "/home/yyang-infobai/.cache/huggingface/hub/models--facebook--vit-mae-large/snapshots/142cb8c25e1b1bc1769997a919aa1b5a2345a6b8"
 
 m_former:
   _target_: latent_motion_tokenizer.src.models.m_former.MFormer
