@@ -15,11 +15,18 @@ import omegaconf
 from glob import glob
 import shutil
 from collections import defaultdict
+import wandb
 
 def cycle(dl):
     while True:
         for data in dl:
             yield data
+
+def crop_image(image, crop_left=80, crop_right=80):
+    width = image.shape[-1]
+    crop_start = crop_left
+    crop_end = width - crop_right
+    return image[..., crop_start:crop_end]
 
 class MotoGPT_Trainer:
     def __init__(
@@ -44,7 +51,8 @@ class MotoGPT_Trainer:
         bs_per_gpu=32,
         max_epoch=None,
         pred_binary_gripper_action=True,
-        paired_loss=False
+        paired_loss=False,
+        paired_method=None,
     ):
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         accelerator= Accelerator(
@@ -89,6 +97,24 @@ class MotoGPT_Trainer:
             latent_motion_tokenizer.eval()
         
         self.writer = SummaryWriter(os.path.join(save_path, 'logs'))
+        
+        # Initialize wandb (only on main process)
+            # wandb init
+        if accelerator.is_main_process:
+            wandb.init(
+                entity="whl23333-tsinghua-university",
+                project="moto-gpt-aloha",
+                name=os.path.basename(save_path.split('/')[-1]),
+                config={
+                    "lr_max": lr_max,
+                    "weight_decay": weight_decay,
+                    "num_epochs": num_epochs,
+                    "batch_size": bs_per_gpu,
+                    "gradient_accumulation_steps": gradient_accumulation_steps,
+                    "num_warmup_epochs": num_warmup_epochs,
+                }
+            )
+        
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.total_prints_per_epoch = total_prints_per_epoch
@@ -109,6 +135,8 @@ class MotoGPT_Trainer:
         self.bs_per_gpu = bs_per_gpu
         self.pred_binary_gripper_action = pred_binary_gripper_action
         self.paired_loss = paired_loss
+        self.paired_method = paired_method
+        self.best_eval_action_loss = float('inf')
 
 
     @property
@@ -138,7 +166,7 @@ class MotoGPT_Trainer:
         step = 0
         
         for epoch in range(self.num_epochs+1):
-            if epoch != 0:
+            if epoch != 0 and (epoch % self.save_epochs == 0):
                 self.accelerator.wait_for_everyone()
                 save_dir = os.path.join(self.save_path, f'saved_epoch_{epoch}_step_{step}')
 
@@ -194,6 +222,36 @@ class MotoGPT_Trainer:
                             eval_log_loss[key] = loss[key].detach()
 
                     self.log(log_loss, eval_log_loss, cum_load_time, clock, epoch, batch_idx, step)
+                    
+                    # Check if we should save best checkpoint (only when act_pred is True)
+                    if self.moto_gpt_config.get('act_pred', False):
+                        current_eval_action_loss = eval_log_loss['action_arm'] + eval_log_loss['action_gripper']
+                        # Gather across all processes
+                        current_eval_action_loss = self.accelerator.gather_for_metrics(current_eval_action_loss).mean()
+                        
+                        if current_eval_action_loss < self.best_eval_action_loss:
+                            self.best_eval_action_loss = current_eval_action_loss
+                            self.accelerator.wait_for_everyone()
+                            best_save_dir = os.path.join(self.save_path, f'best_epoch_{epoch}_step_{step}')
+                            
+                            if self.is_main:
+                                # Remove previous best checkpoint
+                                existing_best_dirs = glob(os.path.join(self.save_path, 'best_epoch_*_step_*'))
+                                for existing_best_dir in existing_best_dirs:
+                                    if existing_best_dir != best_save_dir:
+                                        shutil.rmtree(existing_best_dir)
+                                
+                                os.makedirs(best_save_dir, exist_ok=True)
+                                self.save_checkpoint(best_save_dir)
+                                self.print(f"Saved best checkpoint with eval_action_loss={current_eval_action_loss:.5f}")
+                                
+                                # Log best checkpoint to wandb
+                                wandb.log({
+                                    "best_eval_action_loss": current_eval_action_loss.item() if isinstance(current_eval_action_loss, torch.Tensor) else current_eval_action_loss,
+                                    "best_checkpoint_epoch": epoch,
+                                    "best_checkpoint_step": step
+                                }, step=step)
+                    
                     for key in log_loss:
                         log_loss[key] = torch.tensor(0).float().to(self.device)
                     for key in eval_log_loss:
@@ -232,22 +290,60 @@ class MotoGPT_Trainer:
         self.print(f"Saving visualization results to {visualization_dir} ...")
         self.moto_gpt.eval()
         batch, _ = self.eval_prefetcher.next_without_none()
+        if 'rgb_initial_static' in batch:
+            rgb_initial_key = 'rgb_initial_static'
+            rgb_future_key = 'rgb_future_static'
+        else:
+            rgb_initial_key = 'rgb_initial'
+            rgb_future_key = 'rgb_future'
 
-        orig_rgb_seq = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1)
+        orig_rgb_seq = torch.cat([batch[rgb_initial_key], batch[rgb_future_key]], dim=1) # (b, t+1, c, h, w)
+        if orig_rgb_seq.shape[-1] != orig_rgb_seq.shape[-2]: # if width and height are not equal, crop the image to make them equal for better visualization
+            orig_rgb_seq = crop_image(orig_rgb_seq, crop_left=120, crop_right=40)
+        # rgb_seq = self.rgb_preprocessor(orig_rgb_seq, train=True)
+        # rgb_initial = rgb_seq[:,:1]
+
+        orig_rgb_seq_gripper = None
+        if 'rgb_initial_gripper' in batch:
+            rgb_initial_key = 'rgb_initial_gripper'
+            rgb_future_key = 'rgb_future_gripper'
+            orig_rgb_seq_gripper = torch.cat([batch[rgb_initial_key], batch[rgb_future_key]], dim=1) # (b, t+1, c, h, w)
+            if orig_rgb_seq_gripper.shape[-1] != orig_rgb_seq_gripper.shape[-2]: # if width and height are not equal, crop the image to make them equal for better visualization
+                orig_rgb_seq_gripper = crop_image(orig_rgb_seq_gripper, crop_left=80, crop_right=80)
+            # rgb_seq_gripper = self.rgb_preprocessor(orig_rgb_seq_gripper, train=True)
+            # rgb_initial_gripper = rgb_seq_gripper[:,:1]
+        
+        orig_rgb_seq = torch.cat([orig_rgb_seq, orig_rgb_seq_gripper], dim=0) if orig_rgb_seq_gripper is not None else orig_rgb_seq # (2*b, t+1, c, h, h)
         rgb_seq = self.rgb_preprocessor(orig_rgb_seq, train=True)
-        rgb_initial = rgb_seq[:,:1]
+        if orig_rgb_seq_gripper is not None:
+            rgb_seq = rgb_seq[:orig_rgb_seq_gripper.shape[0]] # (b, t+1, c, h, w)
+            rgb_initial = rgb_seq[:,:1]
+            rgb_seq_gripper = rgb_seq[orig_rgb_seq_gripper.shape[0]:] # (b, t+1, c, h, w)
+            rgb_initial_gripper = rgb_seq_gripper[:,:1]
+        else:
+            rgb_initial = rgb_seq[:,:1] # (b, 1, c, h, w)
 
         # b, t, c, h, w = batch['rgb_future'].shape
         b, t, c, h, w = rgb_seq.shape
         t = t - 1
         if self.paired_loss:
-            gt_latent_motion_ids = self.latent_motion_tokenizer(
-                cond_pixel_values1=rgb_seq[:,:-1].reshape(-1, c, h, w),
-                target_pixel_values1=rgb_seq[:,1:].reshape(-1, c, h, w),
-                cond_pixel_values2=rgb_seq[:,:-1].reshape(-1, c, h, w),
-                target_pixel_values2=rgb_seq[:,1:].reshape(-1, c, h, w),
-                return_motion_token_ids_only=True
-            )
+            if self.paired_method == '3d':
+                assert orig_rgb_seq_gripper is not None, "paired_method is 3d but gripper RGB is not provided in the batch"
+                gt_latent_motion_ids = self.latent_motion_tokenizer(
+                    cond_pixel_values1=rgb_seq[:,:-1].reshape(-1, c, h, w),
+                    target_pixel_values1=rgb_seq[:,1:].reshape(-1, c, h, w),
+                    cond_pixel_values2=rgb_seq_gripper[:,:-1].reshape(-1, c, h, w),
+                    target_pixel_values2=rgb_seq_gripper[:,1:].reshape(-1, c, h, w),
+                    return_motion_token_ids_only=True
+                )
+            else:
+                gt_latent_motion_ids = self.latent_motion_tokenizer(
+                    cond_pixel_values1=rgb_seq[:,:-1].reshape(-1, c, h, w),
+                    target_pixel_values1=rgb_seq[:,1:].reshape(-1, c, h, w),
+                    cond_pixel_values2=rgb_seq[:,:-1].reshape(-1, c, h, w),
+                    target_pixel_values2=rgb_seq[:,1:].reshape(-1, c, h, w),
+                    return_motion_token_ids_only=True
+                )
         else:
             gt_latent_motion_ids = self.latent_motion_tokenizer(
                 cond_pixel_values=rgb_seq[:,:-1].reshape(-1, c, h, w),
@@ -260,6 +356,13 @@ class MotoGPT_Trainer:
             corner=['static']
         )["recons_pixel_values"]
 
+        if orig_rgb_seq_gripper is not None and self.paired_method == '3d':
+            recons_rgb_future_gripper = self.latent_motion_tokenizer.decode_image(
+                cond_pixel_values=rgb_seq_gripper[:,:-1].reshape(-1, c, h, w),
+                given_motion_token_ids=gt_latent_motion_ids,
+                corner=['gripper']
+            )["recons_pixel_values"]
+
         gt_latent_motion_ids = gt_latent_motion_ids.reshape(b, t, -1)
         recons_rgb_future = recons_rgb_future.reshape(b, t, c, h, w)
         recons_rgb_future = self.rgb_preprocessor.post_process(recons_rgb_future)
@@ -270,6 +373,19 @@ class MotoGPT_Trainer:
                 "latent_motion_id_preds": gt_latent_motion_ids.detach().cpu()
             }
         }
+        
+        # Add gripper reconstruction if available
+        if orig_rgb_seq_gripper is not None and self.paired_method == '3d':
+            recons_rgb_future_gripper = recons_rgb_future_gripper.reshape(b, t, c, h, w)
+            recons_rgb_future_gripper = self.rgb_preprocessor.post_process(recons_rgb_future_gripper)
+            decoding_mode2preds["ground_truth_recons"]["frame_preds_gripper"] = recons_rgb_future_gripper.detach().cpu()
+
+        
+
+        # Extract qpos if use_qpos_input is enabled
+        qpos = None
+        if self.moto_gpt_config.get('use_qpos_input', False):
+            qpos = batch.get('qpos_initial', None)
         
         decoding_mode2latent_motion_decoding_kwargs = {
             "sampleFalse_beam1": {
@@ -308,11 +424,17 @@ class MotoGPT_Trainer:
         for decoding_mode, latent_motion_decoding_kwargs in decoding_mode2latent_motion_decoding_kwargs.items():
             frame_preds = []
             latent_motion_id_preds = []
+            frame_preds_gripper = []
 
             cur_cond_pixel_values = rgb_initial.squeeze(1) # (b, c, h, w)
             cur_latent_motion_ids = dummy_latent_motion_ids.clone() # (b, t, per_latent_motion_len)
 
             cur_rgb_initial = rgb_initial # (b, 1, c, h, w)
+            
+            # Initialize gripper tracking if needed
+            if orig_rgb_seq_gripper is not None and self.paired_method == '3d':
+                cur_cond_pixel_values_gripper = rgb_initial_gripper.squeeze(1) # (b, c, h, w)
+                cur_rgb_initial_gripper = rgb_initial_gripper # (b, 1, c, h, w)
 
             for _ in range(gen_iter_num):
                 for buffer_len in range(1, t+1):
@@ -325,6 +447,7 @@ class MotoGPT_Trainer:
                         train=False,
                         lang_attention_mask=batch['lang_attention_mask'],
                         buffer_len=buffer_len,
+                        qpos=qpos,
                         **latent_motion_decoding_kwargs,
                     )
                     cur_latent_motion_id_preds = pred['latent_motion_id_preds'] # (b, per_latent_motion_len)
@@ -337,8 +460,20 @@ class MotoGPT_Trainer:
                     cur_cond_pixel_values = cur_frame_preds
                     frame_preds.append(cur_frame_preds.unsqueeze(1))
                     latent_motion_id_preds.append(cur_latent_motion_id_preds.unsqueeze(1))
+                    
+                    # Generate gripper view if needed
+                    if orig_rgb_seq_gripper is not None and self.paired_method == '3d':
+                        cur_frame_preds_gripper = self.latent_motion_tokenizer.decode_image(
+                            cond_pixel_values=cur_cond_pixel_values_gripper,
+                            given_motion_token_ids=cur_latent_motion_id_preds,
+                            corner=['gripper']
+                        )["recons_pixel_values"] # (b, c, h, w)
+                        cur_cond_pixel_values_gripper = cur_frame_preds_gripper
+                        frame_preds_gripper.append(cur_frame_preds_gripper.unsqueeze(1))
 
                 cur_rgb_initial = cur_frame_preds.unsqueeze(1) # (b, 1, c, h, w)
+                if orig_rgb_seq_gripper is not None and self.paired_method == '3d':
+                    cur_rgb_initial_gripper = cur_frame_preds_gripper.unsqueeze(1) # (b, 1, c, h, w)
 
             frame_preds = torch.cat(frame_preds, dim=1)
             frame_preds = self.rgb_preprocessor.post_process(frame_preds)
@@ -348,29 +483,80 @@ class MotoGPT_Trainer:
                 "frame_preds": frame_preds.detach().cpu(),
                 "latent_motion_id_preds": latent_motion_id_preds.detach().cpu()
             }
+            
+            # Add gripper predictions if available
+            if orig_rgb_seq_gripper is not None and self.paired_method == '3d':
+                frame_preds_gripper = torch.cat(frame_preds_gripper, dim=1)
+                frame_preds_gripper = self.rgb_preprocessor.post_process(frame_preds_gripper)
+                decoding_mode2preds[decoding_mode]["frame_preds_gripper"] = frame_preds_gripper.detach().cpu()
 
         orig_rgb_seq = self.rgb_preprocessor.post_process(rgb_seq)
+        if orig_rgb_seq_gripper is not None and self.paired_method == '3d':
+            orig_rgb_seq_gripper = self.rgb_preprocessor.post_process(rgb_seq_gripper)
         for i in range(b):
             ith_decoding_mode2preds = defaultdict(dict)
             for decoding_mode, preds in decoding_mode2preds.items():
                 for k, v in preds.items():
                     ith_decoding_mode2preds[decoding_mode][k] = v[i]
 
-            visualize_latent_motion_gen(
-                lang_goal=batch['lang'][i],
-                orig_video=orig_rgb_seq[i], 
-                decoding_mode2preds=ith_decoding_mode2preds,
-                path=os.path.join(visualization_dir, f"{self.process_index}-{i}")
-            )
+            # Prepare visualization arguments
+            vis_kwargs = {
+                "lang_goal": batch['lang'][i],
+                "orig_video": orig_rgb_seq[i], 
+                "decoding_mode2preds": ith_decoding_mode2preds,
+                "path": os.path.join(visualization_dir, f"{self.process_index}-{i}")
+            }
+            
+            # Add gripper video if available
+            if orig_rgb_seq_gripper is not None and self.paired_method == '3d':
+                vis_kwargs["orig_video_gripper"] = orig_rgb_seq_gripper[i]
+            
+            visualize_latent_motion_gen(**vis_kwargs)
 
     def calculate_loss(self, batch, train):
         # image preprocessing
         if self.moto_gpt_config.latent_motion_pred:
-            rgb_seq = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1)
-            rgb_seq = self.rgb_preprocessor(rgb_seq, train=train)
-            rgb_initial = rgb_seq[:,:1]
+            if 'rgb_initial_static' in batch:
+                rgb_initial_key = 'rgb_initial_static'
+                rgb_future_key = 'rgb_future_static'
+            else:
+                rgb_initial_key = 'rgb_initial'
+                rgb_future_key = 'rgb_future'
+
+            orig_rgb_seq = torch.cat([batch[rgb_initial_key], batch[rgb_future_key]], dim=1) # (b, t+1, c, h, w)
+            if orig_rgb_seq.shape[-1] != orig_rgb_seq.shape[-2]: # if width and height are not equal, crop the image to make them equal for better visualization
+                orig_rgb_seq = crop_image(orig_rgb_seq, crop_left=120, crop_right=40)
+            # rgb_seq = self.rgb_preprocessor(orig_rgb_seq, train=True)
+            # rgb_initial = rgb_seq[:,:1]
+
+            orig_rgb_seq_gripper = None
+            if 'rgb_initial_gripper' in batch:
+                rgb_initial_key = 'rgb_initial_gripper'
+                rgb_future_key = 'rgb_future_gripper'
+                orig_rgb_seq_gripper = torch.cat([batch[rgb_initial_key], batch[rgb_future_key]], dim=1) # (b, t+1, c, h, w)
+                if orig_rgb_seq_gripper.shape[-1] != orig_rgb_seq_gripper.shape[-2]: # if width and height are not equal, crop the image to make them equal for better visualization
+                    orig_rgb_seq_gripper = crop_image(orig_rgb_seq_gripper, crop_left=80, crop_right=80)
+                # rgb_seq_gripper = self.rgb_preprocessor(orig_rgb_seq_gripper, train=True)
+                # rgb_initial_gripper = rgb_seq_gripper[:,:1]
+            
+            orig_rgb_seq = torch.cat([orig_rgb_seq, orig_rgb_seq_gripper], dim=0) if orig_rgb_seq_gripper is not None else orig_rgb_seq # (2*b, t+1, c, h, h)
+            rgb_seq = self.rgb_preprocessor(orig_rgb_seq, train=True)
+            if orig_rgb_seq_gripper is not None:
+                rgb_seq = rgb_seq[:orig_rgb_seq_gripper.shape[0]] # (b, t+1, c, h, w)
+                rgb_initial = rgb_seq[:,:1]
+                rgb_seq_gripper = rgb_seq[orig_rgb_seq_gripper.shape[0]:] # (b, t+1, c, h, w)
+                rgb_initial_gripper = rgb_seq_gripper[:,:1]
+            else:
+                rgb_initial = rgb_seq[:,:1] # (b, 1, c, h, w)
+            # rgb_seq = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1)
+            # rgb_seq = self.rgb_preprocessor(rgb_seq, train=train)
+            # rgb_initial = rgb_seq[:,:1]
         else:
-            rgb_initial = self.rgb_preprocessor(batch['rgb_initial'], train=train)
+            if 'rgb_initial_static' in batch:
+                rgb_initial_key = 'rgb_initial_static'
+            else:
+                rgb_initial_key = 'rgb_initial'
+            rgb_initial = self.rgb_preprocessor(batch[rgb_initial_key], train=train)
 
         # obtain ground-truth latent motion ids
         if self.moto_gpt_config.latent_motion_pred:
@@ -378,13 +564,23 @@ class MotoGPT_Trainer:
             b, t, c, h, w = rgb_seq.shape
             t = t - 1
             if self.paired_loss:
-                latent_motion_ids = self.latent_motion_tokenizer(
-                    cond_pixel_values1=rgb_seq[:,:-1].reshape(-1, c, h, w),
-                    target_pixel_values1=rgb_seq[:,1:].reshape(-1, c, h, w),
-                    cond_pixel_values2=rgb_seq[:,:-1].reshape(-1, c, h, w),
-                    target_pixel_values2=rgb_seq[:,1:].reshape(-1, c, h, w),
-                    return_motion_token_ids_only=True
-                ).reshape(b, t, -1)
+                if self.paired_method == '3d':
+                    assert orig_rgb_seq_gripper is not None, "paired_method is 3d but gripper RGB is not provided in the batch"
+                    latent_motion_ids = self.latent_motion_tokenizer(
+                        cond_pixel_values1=rgb_seq[:,:-1].reshape(-1, c, h, w),
+                        target_pixel_values1=rgb_seq[:,1:].reshape(-1, c, h, w),
+                        cond_pixel_values2=rgb_seq_gripper[:,:-1].reshape(-1, c, h, w),
+                        target_pixel_values2=rgb_seq_gripper[:,1:].reshape(-1, c, h, w),
+                        return_motion_token_ids_only=True
+                    ).reshape(b, t, -1)
+                else:
+                    latent_motion_ids = self.latent_motion_tokenizer(
+                        cond_pixel_values1=rgb_seq[:,:-1].reshape(-1, c, h, w),
+                        target_pixel_values1=rgb_seq[:,1:].reshape(-1, c, h, w),
+                        cond_pixel_values2=rgb_seq[:,:-1].reshape(-1, c, h, w),
+                        target_pixel_values2=rgb_seq[:,1:].reshape(-1, c, h, w),
+                        return_motion_token_ids_only=True
+                    ).reshape(b, t, -1)
             else:
                 latent_motion_ids = self.latent_motion_tokenizer(
                     cond_pixel_values=rgb_seq[:,:-1].reshape(-1, c, h, w),
@@ -396,6 +592,12 @@ class MotoGPT_Trainer:
 
         # compute loss
         attention_mask = batch['mask'][..., 0]
+        
+        # Extract qpos if use_qpos_input is enabled
+        qpos = None
+        if self.moto_gpt_config.get('use_qpos_input', False):
+            qpos = batch.get('qpos_initial', None)  # (b, qpos_dim)
+        
         pred = self.moto_gpt(
             rgb=rgb_initial, # (b, 1, c, h, w)
             language=batch['lang_input_ids'],
@@ -404,10 +606,11 @@ class MotoGPT_Trainer:
             latent_mask=batch['latent_mask'], # (b, t)
             train=True,
             lang_attention_mask=batch['lang_attention_mask'],
+            qpos=qpos,  # (b, qpos_dim) or None
         )
     
         loss = {}
-        device = batch['rgb_initial'].device
+        device = batch[rgb_initial_key].device
         
         if self.moto_gpt_config.get('pred_discrete_arm_action', False): # NOTE: calculate crosee_entropy loss for discrete arm action
             action_arm_loss_func = cross_entropy
@@ -455,6 +658,7 @@ class MotoGPT_Trainer:
             text = text + ' eval_{}_loss: {:.5f}'.format(key, eval_log_loss[key])
         self.print(text)
         if self.is_main:
+            # TensorBoard logging
             for key in log_loss:
                 self.writer.add_scalar(key+'_loss', log_loss[key], step)
             for key in eval_log_loss:
@@ -462,6 +666,20 @@ class MotoGPT_Trainer:
             self.writer.add_scalar("learning rate", self.scheduler.get_last_lr()[0], step)
             self.writer.add_scalar("FPS", fps, step)
             self.writer.add_scalar("loading time in total time", load_pecnt, step)
+            
+            # Wandb logging
+            wandb_log_dict = {
+                "epoch": epoch,
+                "step": step,
+                "learning_rate": self.scheduler.get_last_lr()[0],
+                "fps": fps.item() if isinstance(fps, torch.Tensor) else fps,
+                "load_percentage": load_pecnt.item() if isinstance(load_pecnt, torch.Tensor) else load_pecnt,
+            }
+            for key in log_loss:
+                wandb_log_dict[f"train/{key}_loss"] = log_loss[key].item() if isinstance(log_loss[key], torch.Tensor) else log_loss[key]
+            for key in eval_log_loss:
+                wandb_log_dict[f"eval/{key}_loss"] = eval_log_loss[key].item() if isinstance(eval_log_loss[key], torch.Tensor) else eval_log_loss[key]
+            wandb.log(wandb_log_dict, step=step)
 
 class MotoGPT_Trainer_Metaworld:
     def __init__(
@@ -857,13 +1075,21 @@ class MotoGPT_Trainer_Metaworld:
             )
 
     def calculate_loss(self, batch, train):
+        # Select camera view (support multi-view datasets)
+        if 'rgb_initial_static' in batch:
+            rgb_initial_key = 'rgb_initial_static'
+            rgb_future_key = 'rgb_future_static'
+        else:
+            rgb_initial_key = 'rgb_initial'
+            rgb_future_key = 'rgb_future'
+        
         # image preprocessing
         if self.moto_gpt_config.latent_motion_pred:
-            rgb_seq = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1)
+            rgb_seq = torch.cat([batch[rgb_initial_key], batch[rgb_future_key]], dim=1)
             rgb_seq = self.rgb_preprocessor(rgb_seq, train=train)
             rgb_initial = rgb_seq[:,:1]
         else:
-            rgb_initial = self.rgb_preprocessor(batch['rgb_initial'], train=train)
+            rgb_initial = self.rgb_preprocessor(batch[rgb_initial_key], train=train)
 
         # obtain ground-truth latent motion ids
         if self.moto_gpt_config.latent_motion_pred:
@@ -880,6 +1106,12 @@ class MotoGPT_Trainer_Metaworld:
 
         # compute loss
         attention_mask = batch['mask'][..., 0]
+        
+        # Extract qpos if use_qpos_input is enabled
+        qpos = None
+        if self.moto_gpt_config.get('use_qpos_input', False):
+            qpos = batch.get('qpos_initial', None)  # (b, qpos_dim)
+        
         pred = self.moto_gpt(
             rgb=rgb_initial, # (b, 1, c, h, w)
             language=batch['lang_input_ids'],
@@ -888,6 +1120,7 @@ class MotoGPT_Trainer_Metaworld:
             latent_mask=batch['latent_mask'], # (b, t)
             train=True,
             lang_attention_mask=batch['lang_attention_mask'],
+            qpos=qpos,  # (b, qpos_dim) or None
         )
     
         loss = {}
@@ -1343,13 +1576,21 @@ class MotoGPT_Trainer_RLBench:
         return loss
             
     def calculate_loss(self, batch, train):
+        # Select camera view (support multi-view datasets)
+        if 'rgb_initial_static' in batch:
+            rgb_initial_key = 'rgb_initial_static'
+            rgb_future_key = 'rgb_future_static'
+        else:
+            rgb_initial_key = 'rgb_initial'
+            rgb_future_key = 'rgb_future'
+        
         # image preprocessing
         if self.moto_gpt_config.latent_motion_pred:
-            rgb_seq = torch.cat([batch['rgb_initial'], batch['rgb_future']], dim=1)
+            rgb_seq = torch.cat([batch[rgb_initial_key], batch[rgb_future_key]], dim=1)
             rgb_seq = self.rgb_preprocessor(rgb_seq, train=train)
             rgb_initial = rgb_seq[:,:1]
         else:
-            rgb_initial = self.rgb_preprocessor(batch['rgb_initial'], train=train)
+            rgb_initial = self.rgb_preprocessor(batch[rgb_initial_key], train=train)
 
         # obtain ground-truth latent motion ids
         if self.moto_gpt_config.latent_motion_pred:
@@ -1375,6 +1616,12 @@ class MotoGPT_Trainer_RLBench:
 
         # compute loss
         attention_mask = batch['mask']
+        
+        # Extract qpos if use_qpos_input is enabled
+        qpos = None
+        if self.moto_gpt_config.get('use_qpos_input', False):
+            qpos = batch.get('qpos_initial', None)  # (b, qpos_dim)
+        
         pred = self.moto_gpt(
             rgb=rgb_initial, # (b, 1, c, h, w)
             language=batch['instr'],
@@ -1382,6 +1629,7 @@ class MotoGPT_Trainer_RLBench:
             latent_motion_ids=latent_motion_ids, # (b, t, per_latent_motion_len)
             latent_mask=batch['latent_mask'], # (b, t)
             train=True,
+            qpos=qpos,  # (b, qpos_dim) or None
             # lang_attention_mask=batch['lang_attention_mask'],
         )
     

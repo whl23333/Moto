@@ -9,3 +9,5 @@ model_checkpoints
 **/eval_results*
 **/berkeley_fanuc_manipulation
 wandb/
+provided_checkpoints/
+results/

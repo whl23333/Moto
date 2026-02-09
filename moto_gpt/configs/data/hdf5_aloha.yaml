@@ -1,0 +1,20 @@
+data_type: "hdf5_aloha"
+hdf5_dir: "/media/disk3/WHL/aloha_cup_plate"
+rgb_shape: [480, 640]
+skip_frame: 5
+
+# Normalization configuration
+use_normalization: true
+norm_stats_path: "/home/hlwang/Moto/norm_stats/norm_stats.pt"
+use_robot_base: false
+
+# Camera configuration
+camera_key: "observations/images/cam_high"
+camera_gripper_key: "observations/images/cam_right_wrist"
+camera_left_key: "observations/images/cam_left_wrist"
+qpos_key: "observations/qpos"
+
+# Data filtering
+no_repeat_data: false
+no_repeat_action: false
+constant_action_atol: 1e-6

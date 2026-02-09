@@ -1,0 +1,27 @@
+moto_gpt_config_path: "/home/hlwang/Moto/moto_gpt/configs/models/actPredTrue_motionPredTrue_visionMaeLarge_seq2_chunk5_maskProb0.5_aloha.yaml"
+latent_motion_tokenizer_path: "/home/hlwang/aloha/latent_motion_tokenizer/single_view_b64_gpu4_aloha/saved_epoch_120_step_59280"
+dataset_config_path: "/home/hlwang/Moto/moto_gpt/configs/data/hdf5_aloha.yaml"
+dataloader_config:
+  bs_per_gpu: 32
+  workers_per_gpu: 7
+  prefetch_factor: 2
+rgb_preprocessor_config: 
+  model_vision_type: "mae"
+  vision_aug_config: 
+    do_random_resized_crop: false
+    do_random_shift: true
+training_config:
+  num_epochs: 500
+  num_warmup_epochs: 25
+  print_steps: 200
+  lr_max: 0.0002
+  weight_decay: 0.0001
+  gradient_accumulation_steps: 8
+  save_epochs: 20
+  save_steps: 10000
+  save_path: "/home/hlwang/Moto/moto_gpt/outputs/moto_gpt_finetune_aloha_hdf5_actPredTrue_use_qpos_input_train_from_scratch/"
+  resume_ckpt_path: null
+  max_epoch: null
+  pred_binary_gripper_action: false # gripper 预测连续值
+  paired_loss: false
+  paired_method: null

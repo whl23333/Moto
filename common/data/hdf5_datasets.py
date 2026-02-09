@@ -34,6 +34,10 @@ class HDF5Dataset_for_MotoGPT_CALVINLike(Dataset):
         debug=True,
         debug_sample_idx=None,
         max_attempts=50,
+        norm_stats=None,
+        use_robot_base=False,
+        use_normalization=False,
+        **kwargs
     ):
         super().__init__()
 
@@ -51,6 +55,9 @@ class HDF5Dataset_for_MotoGPT_CALVINLike(Dataset):
         self.debug = debug
         self.debug_sample_idx = debug_sample_idx
         self.max_attempts = max_attempts
+        self.norm_stats = norm_stats
+        self.use_robot_base = use_robot_base
+        self.use_normalization = use_normalization
 
         self.camera_key = camera_key
         self.qpos_key = qpos_key
@@ -213,7 +220,41 @@ class HDF5Dataset_for_MotoGPT_CALVINLike(Dataset):
     def _read_qpos_f(self, f, idx):
         qpos = f[self.qpos_key][idx]
         act = np.asarray(qpos[-7:], dtype=np.float32)
-        return torch.from_numpy(act)
+        act_tensor = torch.from_numpy(act)
+        
+        # Apply normalization if stats are provided
+        if self.norm_stats is not None:
+            qpos_mean = self.norm_stats["qpos_mean"]
+            qpos_std = self.norm_stats["qpos_std"]
+            # Ensure tensors are on the same device
+            if isinstance(qpos_mean, torch.Tensor):
+                qpos_mean = qpos_mean.cpu()
+            if isinstance(qpos_std, torch.Tensor):
+                qpos_std = qpos_std.cpu()
+            act_tensor = (act_tensor - qpos_mean) / qpos_std
+        
+        return act_tensor
+    
+    def _read_initial_qpos_f(self, f, idx):
+        """Read last 7 dims for proprioceptive state input"""
+        qpos = f[self.qpos_key][idx]
+        qpos_tensor = torch.from_numpy(np.asarray(qpos, dtype=np.float32))
+        qpos_tensor = qpos_tensor[-7:]  # take last 7 dims as proprioceptive state, only use right arm for now
+        
+        # Apply normalization if stats are provided
+        # Note: we use the same normalization as action (last 7 dims)
+        # If needed, can add separate qpos normalization stats
+        if self.norm_stats is not None:
+            qpos_mean = self.norm_stats["qpos_mean"]
+            qpos_std = self.norm_stats["qpos_std"]
+            # Ensure tensors are on the same device
+            if isinstance(qpos_mean, torch.Tensor):
+                qpos_mean = qpos_mean.cpu()
+            if isinstance(qpos_std, torch.Tensor):
+                qpos_std = qpos_std.cpu()
+            qpos_tensor = (qpos_tensor - qpos_mean) / qpos_std
+        
+        return qpos_tensor # shape (7,)
 
     def _get_file(self, file_path):
         """Get (and cache) an open HDF5 file handle for this path.
@@ -279,6 +320,9 @@ class HDF5Dataset_for_MotoGPT_CALVINLike(Dataset):
                 rgb_initial[0] = self._read_frame_f(f, start_local_step)
                 rgb_initial_gripper[0] = self._read_frame_gripper_f(f, start_local_step)
                 rgb_initial_left[0] = self._read_frame_left_f(f, start_local_step)
+                
+                # Read initial qpos (proprioceptive state at start)
+                qpos_initial = self._read_initial_qpos_f(f, start_local_step)
 
                 # future frames
                 if self.do_extract_future_frames:
@@ -324,6 +368,7 @@ class HDF5Dataset_for_MotoGPT_CALVINLike(Dataset):
                     "actions": actions,
                     "mask": mask,
                     "latent_mask": latent_mask,
+                    "qpos_initial": qpos_initial,  # Add initial qpos for proprioceptive input
                     "idx": idx,
                     "delta_t": delta_t,
                     "start_local_step": start_local_step,

@@ -33,7 +33,8 @@ def visualize_latent_motion_gen(
         lang_goal,
         orig_video, 
         decoding_mode2preds,
-        path
+        path,
+        orig_video_gripper=None
     ):
     _, c, h, w = orig_video.shape
     n_rows = len(decoding_mode2preds)+1
@@ -42,13 +43,25 @@ def visualize_latent_motion_gen(
     orig_video = list(map(T.ToPILImage(), orig_video.unbind(dim=0)))
     initial_frame = orig_video[0]
     gt_subsequent_frames = orig_video[1:]
+    
+    # Check if gripper data is available
+    has_gripper = orig_video_gripper is not None
+    if has_gripper:
+        orig_video_gripper = list(map(T.ToPILImage(), orig_video_gripper.unbind(dim=0)))
+        initial_frame_gripper = orig_video_gripper[0]
+        gt_subsequent_frames_gripper = orig_video_gripper[1:]
+    
     for decoding_mode, preds in decoding_mode2preds.items():
         preds['latent_motion_id_preds'] = preds['latent_motion_id_preds'].numpy().tolist()
         preds['frame_preds'] = list(map(T.ToPILImage(), preds['frame_preds'].unbind(dim=0)))
+        if has_gripper and 'frame_preds_gripper' in preds:
+            preds['frame_preds_gripper'] = list(map(T.ToPILImage(), preds['frame_preds_gripper'].unbind(dim=0)))
         n_cols = len(preds['frame_preds']) + 1
 
     font_path = os.path.join(cv2.__path__[0],'qt','fonts','DejaVuSans.ttf')
     font = ImageFont.truetype(font_path, size=12)
+    
+    # Create static camera view image
     compare_img = Image.new('RGB', size=(n_cols*w, n_rows*h))
     draw_compare_img = ImageDraw.Draw(compare_img)
     
@@ -69,10 +82,34 @@ def visualize_latent_motion_gen(
 
     draw_compare_img.text((0, h-20), f"{lang_goal}", font=font, fill=(0, 255, 0))
     compare_img.save(f"{path}-{'_'.join(lang_goal.split())}.png")
+    
+    # Create gripper camera view image if available
+    if has_gripper:
+        compare_img_gripper = Image.new('RGB', size=(n_cols*w, n_rows*h))
+        draw_compare_img_gripper = ImageDraw.Draw(compare_img_gripper)
+        
+        for i in range(n_rows):
+            compare_img_gripper.paste(initial_frame_gripper, box=(0, i*h))
 
+        for j in range(n_cols-1):
+            if j < len(gt_subsequent_frames_gripper):
+                compare_img_gripper.paste(gt_subsequent_frames_gripper[j], box=((j+1)*w, 0))
+
+            for i, (decoding_mode, preds) in enumerate(decoding_mode2preds.items()):
+                if 'frame_preds_gripper' in preds and j < len(preds['frame_preds_gripper']):
+                    compare_img_gripper.paste(preds['frame_preds_gripper'][j], box=((j+1)*w, (i+1)*h))
+                    draw_compare_img_gripper.text(((j+1)*w, (i+2)*h-20), f"{preds['latent_motion_id_preds'][j]}", font=font, fill=(0, 255, 0))
+                
+                if j == 0:
+                    draw_compare_img_gripper.text((0, (i+2)*h-20), f"{decoding_mode}", font=font, fill=(0, 255, 0))
+
+        draw_compare_img_gripper.text((0, h-20), f"{lang_goal}", font=font, fill=(0, 255, 0))
+        compare_img_gripper.save(f"{path}-{'_'.join(lang_goal.split())}-gripper.png")
 
     h = h - 30
     fps = 4
+    
+    # Generate videos for static camera view
     for i, (decoding_mode, preds) in enumerate(decoding_mode2preds.items()):
         output_video_path = f"{path}-{'_'.join(lang_goal.split())}-{decoding_mode}.mp4"
         images = preds['frame_preds']
@@ -85,3 +122,16 @@ def visualize_latent_motion_gen(
             image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
             video_writer.write(image_cv)
         video_writer.release()
+        
+        # Generate videos for gripper camera view if available
+        if has_gripper and 'frame_preds_gripper' in preds:
+            output_video_path_gripper = f"{path}-{'_'.join(lang_goal.split())}-{decoding_mode}-gripper.mp4"
+            images_gripper = preds['frame_preds_gripper']
+            images_gripper = [initial_frame_gripper] + images_gripper
+
+            video_writer_gripper = cv2.VideoWriter(output_video_path_gripper, fourcc, fps, (w, h))
+
+            for image in images_gripper:
+                image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+                video_writer_gripper.write(image_cv)
+            video_writer_gripper.release()

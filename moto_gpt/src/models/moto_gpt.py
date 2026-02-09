@@ -45,6 +45,8 @@ class MotoGPT(nn.Module):
             use_timestep_embedding=False,
             use_latent_motion_pos_embedding=False,
             lang_embed_dim=None,
+            use_qpos_input=False,  # NEW: whether to use qpos as proprioceptive input
+            qpos_dim=14,  # NEW: qpos dimension (default 14 for ALOHA)
             **kwargs
     ):
         super().__init__()
@@ -58,6 +60,10 @@ class MotoGPT(nn.Module):
         
         self.latent_motion_pred = latent_motion_pred
         self.act_pred = act_pred
+        
+        # NEW: qpos input config
+        self.use_qpos_input = use_qpos_input
+        self.qpos_dim = qpos_dim
 
         # GPT
         self.hidden_size = hidden_size
@@ -94,6 +100,10 @@ class MotoGPT(nn.Module):
         # Embedding function for vision
         self.embed_img = torch.nn.Linear(self.img_feat_dim, hidden_size)
         self.embed_patch = torch.nn.Linear(self.patch_feat_dim, hidden_size)
+        
+        # NEW: Embedding function for qpos (proprioceptive state)
+        if self.use_qpos_input:
+            self.embed_qpos = torch.nn.Linear(self.qpos_dim, hidden_size)
         
         # Embedding functions for latent motions
         self.embed_latent_motion = nn.Embedding(latent_motion_codebook_size, hidden_size)
@@ -157,6 +167,7 @@ class MotoGPT(nn.Module):
                 latent_mask, # (b, t)
                 train=True,
                 lang_attention_mask=None,
+                qpos=None,  # NEW: (b, qpos_dim) - optional proprioceptive state input
                 **kwargs
     ):
         arm_action_preds = None
@@ -191,6 +202,12 @@ class MotoGPT(nn.Module):
         if obs_embeddings is not None:
             obs_embeddings = self.embed_img(obs_embeddings.float())  # (b, 1, h)
         patch_embeddings = self.embed_patch(patch_embeddings.float())  # (b, n_patchs, h)
+        
+        # NEW: Embed qpos (proprioceptive state)
+        qpos_embeddings = None
+        if self.use_qpos_input and qpos is not None:
+            qpos_embeddings = self.embed_qpos(qpos.float())  # (b, qpos_dim) -> (b, h)
+            qpos_embeddings = qpos_embeddings.unsqueeze(1)  # (b, 1, h)
        
         # Add conditional embeddings
         condition_embeddings = self.embed_condition.weight.view(1, 1, self.hidden_size)  # (1, 1, h)
@@ -198,12 +215,16 @@ class MotoGPT(nn.Module):
         patch_embeddings = patch_embeddings + condition_embeddings # (b, n_patchs, h)
         if obs_embeddings is not None:
             obs_embeddings = obs_embeddings + condition_embeddings
+        if qpos_embeddings is not None:
+            qpos_embeddings = qpos_embeddings + condition_embeddings
        
-        # Format sequence: lang, patch, obs, [LATENT_1], [ACT_1], ... , [LATENT_t], [ACT_t]
+        # Format sequence: lang, patch, obs, qpos (if enabled), [LATENT_1], [ACT_1], ... , [LATENT_t], [ACT_t]
         if obs_embeddings is None:
             obs_embeddings = torch.tensor([]).to(rgb.device)
+        if qpos_embeddings is None:
+            qpos_embeddings = torch.tensor([]).to(rgb.device)
         
-        cond_stacked_inputs = torch.cat((lang_embeddings, patch_embeddings, obs_embeddings), dim=1)  # (b, n_cond_tokens, h)
+        cond_stacked_inputs = torch.cat((lang_embeddings, patch_embeddings, obs_embeddings, qpos_embeddings), dim=1)  # (b, n_cond_tokens, h)
 
 
         if self.latent_motion_pred:
@@ -231,7 +252,8 @@ class MotoGPT(nn.Module):
         n_lang_tokens = lang_embeddings.shape[1]
         n_patch_tokens = patch_embeddings.shape[1]
         n_obs_tokens = 1 if obs_embeddings.shape[0] > 0 else 0
-        n_cond_tokens = n_lang_tokens + n_patch_tokens + n_obs_tokens
+        n_qpos_tokens = 1 if (qpos_embeddings is not None and qpos_embeddings.shape[0] > 0) else 0
+        n_cond_tokens = n_lang_tokens + n_patch_tokens + n_obs_tokens + n_qpos_tokens
         
         n_tokens = 0
         n_latent_motion_pred_tokens = 1 + self.per_latent_motion_len

@@ -1,0 +1,77 @@
+# HDF5 Dataset Configuration for MotoGPT ALOHA Training
+
+# Dataset Configuration
+dataset:
+  type: "HDF5Dataset_for_MotoGPT_CALVINLike"
+  hdf5_dir: "/path/to/your/hdf5/data"  # 修改为你的数据路径
+  split: "train"  # or "val"
+  skip_frame: 5
+  sequence_length: 1
+  chunk_size: 3
+  act_dim: 7
+  do_extract_future_frames: true
+  do_extract_action: true
+  rgb_shape: [224, 224]
+  max_skip_frame: 10
+  no_repeat_data: false
+  no_repeat_action: true
+  constant_action_atol: 1e-6
+  
+  # Camera Configuration
+  camera_key: "observations/images/cam_high"
+  camera_gripper_key: "observations/images/cam_right_wrist"
+  camera_left_key: "observations/images/cam_left_wrist"
+  qpos_key: "observations/qpos"
+  
+  # Normalization Configuration
+  use_normalization: true
+  norm_stats_path: "./norm_stats/norm_stats.pt"  # 归一化统计信息保存路径
+  compute_norm_stats: true  # 是否自动计算（首次运行时）
+  norm_num_episodes: null  # 用多少 episodes 计算 norm，null 表示全部
+  use_robot_base: false
+
+# RGB Preprocessor Configuration
+rgb_preprocessor:
+  rgb_shape: [224, 224]
+  rgb_mean: [0.485, 0.456, 0.406]
+  rgb_std: [0.229, 0.224, 0.225]
+  do_random_resized_crop: false
+  do_random_shift: true
+  use_original_rgb: true
+
+# Training Configuration
+training:
+  batch_size_train: 32
+  batch_size_val: 32
+  num_epochs: 100
+  lr_max: 0.0001
+  weight_decay: 0.0001
+  num_warmup_epochs: 5
+  gradient_accumulation_steps: 4
+  print_steps: 100
+  save_steps: 10000
+  save_epochs: 1
+  
+  # Action prediction configuration
+  pred_binary_gripper_action: true  # gripper 使用 BCE loss
+  pred_discrete_arm_action: false   # arm action 使用连续值预测
+
+# MotoGPT Model Configuration
+moto_gpt:
+  latent_motion_pred: true
+  sequence_length: 1
+  paired_loss: false
+  pred_discrete_arm_action: false
+
+# Paths
+paths:
+  save_path: "./checkpoints/aloha_hdf5"
+  resume_ckpt_path: null  # 如果要从checkpoint恢复训练，设置路径
+
+# DataLoader Configuration
+dataloader:
+  num_workers: 4
+  pin_memory: true
+  shuffle_train: true
+  prefetch_factor: 4
+  persistent_workers: true

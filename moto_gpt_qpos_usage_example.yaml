@@ -1,0 +1,50 @@
+# Example configuration showing how to enable qpos (proprioceptive state) input in MotoGPT
+# 
+# To use qpos input, add the following parameters to your moto_gpt model config:
+
+_target_: moto_gpt.src.models.moto_gpt.MotoGPT
+model_lang:
+  _target_: transformers.T5EncoderModel.from_pretrained
+  pretrained_model_name_or_path: t5-base
+model_vision:
+  _target_: moto_gpt.src.models.mae_model.MaeEncoder
+  use_obs_feature: true
+  pretrained_model_name_or_path: facebook/vit-mae-large
+model_causal_transformer:
+  _target_: moto_gpt.src.models.trajectory_gpt2.GPT2Model
+  config:
+    _target_: moto_gpt.src.models.trajectory_gpt2.GPT2Config
+    vocab_size: 1
+    n_embd: 768
+    n_layer: 12
+    n_head: 12
+    activation_function: relu
+    dropout: 0.1
+    n_positions: 1024
+act_dim: 7
+hidden_size: 768
+sequence_length: 2
+chunk_size: 5
+per_latent_motion_len: 8
+latent_motion_codebook_size: 128
+latent_motion_pred: true
+act_pred: true
+img_feat_dim: 1024
+patch_feat_dim: 1024
+lang_feat_dim: 768
+mask_latent_motion_probability: 0.5
+freeze_lang: true
+freeze_vision: true
+
+# NEW: Enable qpos (proprioceptive state) input
+# When enabled, the model will receive the current joint positions as additional input
+use_qpos_input: true  # Set to true to enable, false to disable (default: false)
+qpos_dim: 14          # Dimension of qpos (14 for ALOHA: 2 arms × 7 DOF each)
+                      # For other robots, adjust this to match your qpos dimension
+
+# Notes:
+# 1. qpos will be embedded via a linear layer (qpos_dim -> hidden_size)
+# 2. qpos embedding is added as a condition token after obs in the sequence:
+#    Sequence format: [lang, patch, obs, qpos, LATENT_1, ACT_1, ..., LATENT_t, ACT_t]
+# 3. The HDF5 dataset must contain 'qpos_initial' key (automatically provided by modified dataset)
+# 4. qpos is normalized using the same statistics as actions (from norm_stats)

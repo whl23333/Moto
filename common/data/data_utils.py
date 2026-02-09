@@ -9,6 +9,8 @@ from transformers import AutoTokenizer
 from transformers.utils import FEATURE_EXTRACTOR_NAME, get_file_from_repo
 import json
 from common.data.datasets import LMDBDataset_for_MotoGPT_RT1, LMDBDataset_for_MotoGPT_OXE, LMDBDataset_for_MotoGPT_Video, LMDBDataset_Mix, JsonDataset_for_MotoGPT_Video, NpzDataset_for_MotoGPT_Video, LMDBDataset_for_MotoGPT_CALVIN, NpzDataset_for_MotoGPT_Video_Multiview
+from common.data.hdf5_datasets import HDF5Dataset_for_MotoGPT_CALVINLike
+from common.data.norm_utils import compute_norm_stats_from_hdf5, load_norm_stats, save_norm_stats
 from common.data.mix_utils import BASE_STEPSIZE, DISPLAY_KEY
 from torchvision.transforms.v2 import Resize, InterpolationMode
 from torch.utils.data import ConcatDataset, WeightedRandomSampler
@@ -26,6 +28,7 @@ data_type2dataset_cls = {
     'video_npz': NpzDataset_for_MotoGPT_Video,
     'video_npz_multiview': NpzDataset_for_MotoGPT_Video_Multiview,
     'calvin': LMDBDataset_for_MotoGPT_CALVIN,
+    'hdf5_aloha': HDF5Dataset_for_MotoGPT_CALVINLike,
 }
 
 def load_dataset(data_config, extra_data_config):
@@ -42,6 +45,25 @@ def load_dataset(data_config, extra_data_config):
     for k, v in extra_data_config.items():
         mapped_k = key_map.get(k, k)
         data_config[mapped_k] = v
+
+    # Handle normalization for HDF5 datasets
+    norm_stats = None
+    if data_type == 'hdf5_aloha' and data_config.get('use_normalization', False):
+        norm_stats_path = data_config.get('norm_stats_path', None)
+        if norm_stats_path and os.path.exists(norm_stats_path):
+            print(f"Loading normalization stats from {norm_stats_path}")
+            norm_stats = load_norm_stats(norm_stats_path)
+        else:
+            # Compute normalization stats if not found
+            print(f"Computing normalization stats for {data_config.get('hdf5_dir')}")
+            norm_stats = compute_norm_stats_from_hdf5(
+                hdf5_dir=data_config.get('hdf5_dir'),
+                qpos_key=data_config.get('qpos_key', 'observations/qpos'),
+                use_robot_base=data_config.get('use_robot_base', False),
+            )
+            if norm_stats_path:
+                save_norm_stats(norm_stats, norm_stats_path)
+        data_config['norm_stats'] = norm_stats
 
     if data_type == 'mix':
         sub_data_configs = data_config.pop('sub_data_configs')
