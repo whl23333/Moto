@@ -11,3 +11,4 @@ model_checkpoints
 wandb/
 provided_checkpoints/
 results/
+norm_stats/

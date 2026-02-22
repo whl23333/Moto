@@ -95,7 +95,7 @@ def main(cfg):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config_path', type=str, 
-                       default="/home/hlwang/Moto/moto_gpt/configs/train/hdf5_aloha_train.yaml",
+                       default="/home/hlwang/Moto/moto_gpt/configs/train/hdf5_aloha_train_actPredTrue.yaml",
                        help="Path to training configuration file")
     args = parser.parse_args()
 

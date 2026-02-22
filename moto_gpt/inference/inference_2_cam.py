@@ -4,12 +4,18 @@
 #!/usr/bin/python3
 """
 
+import pyrootutils
+pyrootutils.setup_root(__file__, indicator='.project-root', pythonpath=True, dotenv=True)
+
 import torch
 import numpy as np
 import os
 import pickle
 import argparse
 from einops import rearrange
+import omegaconf
+import hydra
+from transformers import AutoTokenizer
 
 from utils import compute_dict_mean, set_seed, detach_dict # helper functions
 from policy import ACTPolicy, CNNMLPPolicy, DiffusionPolicy
@@ -27,6 +33,8 @@ import threading
 import math
 import threading
 
+# MotoGPT imports
+from common.processors.preprocessor_utils import get_rgb_preprocessor
 
 import sys
 sys.path.append("./")
@@ -40,6 +48,213 @@ inference_thread = None
 inference_lock = threading.Lock()
 inference_actions = None
 inference_timestep = None
+
+
+def crop_image(image, crop_left=120, crop_right=40):
+    """Crop image to match training preprocessing for MotoGPT"""
+    if len(image.shape) == 4:  # (b, c, h, w)
+        width = image.shape[-1]
+        crop_start = crop_left
+        crop_end = width - crop_right
+        return image[..., crop_start:crop_end]
+    elif len(image.shape) == 3:  # (c, h, w)
+        width = image.shape[-1]
+        crop_start = crop_left
+        crop_end = width - crop_right
+        return image[..., crop_start:crop_end]
+    else:
+        raise ValueError(f"Unexpected image shape: {image.shape}")
+
+
+class MotoGPTInference:
+    """MotoGPT inference wrapper class"""
+    def __init__(self, args):
+        """Initialize MotoGPT inference"""
+        # Load MotoGPT config
+        moto_gpt_config_path = os.path.join(args.ckpt_dir, 'config.yaml')
+        print(f"Loading MotoGPT config from {moto_gpt_config_path}")
+        self.moto_gpt_config = omegaconf.OmegaConf.load(moto_gpt_config_path)
+        
+        # Initialize MotoGPT model
+        print(f"Initializing MotoGPT model...")
+        self.moto_gpt = hydra.utils.instantiate(self.moto_gpt_config)
+        self.moto_gpt.config = self.moto_gpt_config
+        
+        # Load model checkpoint
+        ckpt_path = os.path.join(args.ckpt_dir, args.ckpt_name)
+        print(f"Loading checkpoint from {ckpt_path}")
+        state_dict = torch.load(ckpt_path, map_location='cpu')
+        self.moto_gpt.load_state_dict(state_dict, strict=False)
+        self.moto_gpt.cuda()
+        self.moto_gpt.eval()
+        print("MotoGPT model loaded successfully!")
+        
+        # Initialize language tokenizer
+        lang_model_name = self.moto_gpt_config['model_lang']['pretrained_model_name_or_path']
+        print(f"Loading language tokenizer: {lang_model_name}")
+        self.lang_tokenizer = AutoTokenizer.from_pretrained(lang_model_name)
+        
+        # Initialize RGB preprocessor
+        rgb_preprocessor_config = args.rgb_preprocessor_config
+        print(f"Initializing RGB preprocessor with config: {rgb_preprocessor_config}")
+        self.rgb_preprocessor = get_rgb_preprocessor(**rgb_preprocessor_config)
+        self.rgb_preprocessor = self.rgb_preprocessor.cuda()
+        self.rgb_preprocessor.use_original_rgb = False
+        
+        # Store config
+        self.args = args
+        self.chunk_size = self.moto_gpt_config['chunk_size']
+        self.sequence_length = self.moto_gpt_config['sequence_length']
+        self.use_qpos_input = self.moto_gpt_config.get('use_qpos_input', False)
+        
+        # Get action dim from config
+        self.act_dim = self.moto_gpt_config.get('act_dim', 7)
+        
+        print(f"Inference config:")
+        print(f"  - Chunk size: {self.chunk_size}")
+        print(f"  - Sequence length: {self.sequence_length}")
+        print(f"  - Use qpos input: {self.use_qpos_input}")
+        print(f"  - Action dim: {self.act_dim}")
+    
+    def preprocess_qpos(self, qpos, stats):
+        """Normalize qpos using training stats (only last 7 dims for right arm)"""
+        qpos_mean = stats['qpos_mean']
+        qpos_std = stats['qpos_std']
+        qpos_mean = np.array(qpos_mean, dtype=np.float32)
+        qpos_std = np.array(qpos_std, dtype=np.float32)
+        qpos = (qpos - qpos_mean) / qpos_std
+        return qpos
+    
+    def postprocess_action(self, action, stats):
+        """Denormalize action using training stats"""
+        qpos_mean = stats['qpos_mean']
+        qpos_std = stats['qpos_std']
+        qpos_mean = np.array(qpos_mean, dtype=np.float32)
+        qpos_std = np.array(qpos_std, dtype=np.float32)
+        action = action * qpos_std + qpos_mean
+        return action
+    
+    def tokenize_language(self, language_instruction):
+        """Tokenize language instruction"""
+        lang_inputs = self.lang_tokenizer(
+            [language_instruction],
+            return_tensors="pt",
+            padding=True
+        )
+        lang_input_ids = lang_inputs.input_ids.cuda()
+        lang_attention_mask = lang_inputs.attention_mask.cuda()
+        return lang_input_ids, lang_attention_mask
+    
+    @torch.no_grad()
+    def __call__(self, curr_image, curr_depth_image, qpos, stats, language_instruction=""):
+        """
+        Predict actions for current observation
+        Compatible with original inference_process interface
+        
+        Args:
+            curr_image: preprocessed image tensor (1, n_cameras, c, h, w)
+            curr_depth_image: depth image (unused, for compatibility)
+            qpos: normalized qpos tensor (1, qpos_dim)
+            stats: normalization stats dict
+            language_instruction: text instruction (optional)
+        
+        Returns:
+            actions: tensor of shape (1, chunk_size, act_dim)
+        """
+        # 1. Crop images for MotoGPT
+        if self.args.crop_image:
+            curr_image_static = curr_image[:, 0]  # (1, c, h, w)
+            curr_image_static = crop_image(curr_image_static,
+                                           crop_left=self.args.crop_left,
+                                           crop_right=self.args.crop_right)
+            curr_image_gripper = curr_image[:, 1]  # (1, c, h, w)
+            curr_image_gripper = crop_image(curr_image_gripper,
+                                            crop_left=80,
+                                            crop_right=80)
+            curr_image = torch.stack([curr_image_static, curr_image_gripper], dim=1)
+        
+        # 2. Apply RGB preprocessor
+        rgb_initial = self.rgb_preprocessor(curr_image, train=False)  # (1, n_cameras, c, h, w)
+        
+        # Take only first camera view for model input
+        rgb_initial = rgb_initial[:, :1]  # (1, 1, c, h, w)
+        
+        # 3. Process language
+        if language_instruction:
+            lang_input_ids, lang_attention_mask = self.tokenize_language(language_instruction)
+        else:
+            lang_input_ids, lang_attention_mask = self.tokenize_language("")
+        
+        # 4. Process qpos - need to denormalize first, take last 7 dims, then renormalize
+        # qpos comes in already normalized with 14-dim stats, we need 7-dim
+        qpos_14dim = qpos.cpu().numpy()[0]  # (14,) normalized
+        qpos_14dim_denorm = qpos_14dim * stats['qpos_std'] + stats['qpos_mean']  # denormalize
+        qpos_7dim = qpos_14dim_denorm[-7:]  # take last 7 dims (right arm)
+        qpos_7dim_norm = self.preprocess_qpos(qpos_7dim, stats)  # re-normalize with 7-dim stats
+        qpos_tensor = torch.from_numpy(qpos_7dim_norm).float().cuda().unsqueeze(0) if self.use_qpos_input else None
+        
+        # 5. Prepare model inputs
+        batch_size = 1
+        if self.moto_gpt_config.get('latent_motion_pred', False):
+            per_latent_motion_len = self.moto_gpt_config['per_latent_motion_len']
+            latent_motion_ids = torch.zeros(
+                (batch_size, self.sequence_length, per_latent_motion_len),
+                dtype=torch.long
+            ).cuda()
+        else:
+            latent_motion_ids = None
+        
+        attention_mask = torch.ones((batch_size, self.sequence_length), dtype=torch.long).cuda()
+        latent_mask = torch.ones((batch_size, self.sequence_length), dtype=torch.long).cuda()
+        
+        # 6. Forward pass through MotoGPT
+        pred = self.moto_gpt(
+            rgb=rgb_initial,
+            language=lang_input_ids,
+            attention_mask=attention_mask,
+            latent_motion_ids=latent_motion_ids,
+            latent_mask=latent_mask,
+            train=False,
+            lang_attention_mask=lang_attention_mask,
+            qpos=qpos_tensor
+        )
+        
+        # 7. Extract and process predictions
+        arm_actions = pred['arm_action_preds']
+        gripper_actions = pred['gripper_action_preds']
+        
+        if arm_actions is None or gripper_actions is None:
+            raise ValueError("Model did not predict actions. Check if act_pred=True in config.")
+        
+        # Reshape: (b, t, chunk_size, act_dim) -> (b, t*chunk_size, act_dim)
+        batch_size = arm_actions.shape[0]
+        seq_len = arm_actions.shape[1]
+        chunk_size = arm_actions.shape[2]
+        
+        arm_actions = arm_actions.reshape(batch_size, seq_len * chunk_size, -1)
+        gripper_actions = gripper_actions.reshape(batch_size, seq_len * chunk_size, -1)
+        
+        # Concatenate arm and gripper actions
+        actions_7dim = torch.cat([arm_actions, gripper_actions], dim=-1)  # (b, t*chunk_size, 7)
+        
+        # 8. Denormalize and expand to 14-dim for compatibility
+        actions_7dim_np = actions_7dim[0].cpu().numpy()  # (t*chunk_size, 7)
+        actions_7dim_denorm = self.postprocess_action(actions_7dim_np, stats)
+        
+        # Expand to 14-dim: left arm stays at current position, right arm uses prediction
+        # For inference: left arm = qpos[:7], right arm = predicted
+        left_arm_action = qpos_14dim_denorm[:7]  # Keep left arm at current position
+        actions_14dim = np.zeros((actions_7dim_denorm.shape[0], 14), dtype=np.float32)
+        for i in range(actions_7dim_denorm.shape[0]):
+            actions_14dim[i, :7] = left_arm_action
+            actions_14dim[i, 7:14] = actions_7dim_denorm[i]
+        
+        # Re-normalize to 14-dim for compatibility with temporal_agg
+        actions_14dim_norm = (actions_14dim - stats['qpos_mean']) / stats['qpos_std']
+        
+        # Return as tensor with shape (1, chunk_size, 14)
+        actions_tensor = torch.from_numpy(actions_14dim_norm).float().unsqueeze(0)
+        return actions_tensor
 
 
 def actions_interpolation(args, pre_action, actions, stats):
@@ -136,6 +351,14 @@ def get_model_config(args):
                          'num_inference_timesteps': args.num_inference_timesteps,
                          'ema_power': args.ema_power
                          }
+    elif args.policy_class == 'MotoGPT':
+        # MotoGPT uses its own config from checkpoint directory
+        policy_config = {
+            'chunk_size': args.chunk_size,
+            'camera_names': task_config['camera_names'],
+            'use_depth_image': args.use_depth_image,
+            'use_robot_base': args.use_robot_base,
+        }
     else:
         raise NotImplementedError
 
@@ -153,13 +376,15 @@ def get_model_config(args):
     return config
 
 
-def make_policy(policy_class, policy_config):
+def make_policy(policy_class, policy_config, args=None):
     if policy_class == 'ACT':
         policy = ACTPolicy(policy_config)
     elif policy_class == 'CNNMLP':
         policy = CNNMLPPolicy(policy_config)
     elif policy_class == 'Diffusion':
         policy = DiffusionPolicy(policy_config)
+    elif policy_class == 'MotoGPT':
+        policy = MotoGPTInference(args)
     else:
         raise NotImplementedError
     return policy
@@ -243,7 +468,13 @@ def inference_process(args, config, ros_operator, policy, stats, t, pre_action):
         if args.use_depth_image:
             curr_depth_image = get_depth_image(obs, config['camera_names'])
         start_time = time.time()
-        all_actions = policy(curr_image, curr_depth_image, qpos)
+        
+        # Call policy - MotoGPT has different interface
+        if config['policy_class'] == 'MotoGPT':
+            all_actions = policy(curr_image, curr_depth_image, qpos, stats, args.language_instruction)
+        else:
+            all_actions = policy(curr_image, curr_depth_image, qpos)
+        
         end_time = time.time()
         print("model cost time: ", end_time -start_time)
         inference_lock.acquire()
@@ -265,34 +496,44 @@ def model_inference(args, config, ros_operator, save_episode=True):
     global inference_thread
     set_seed(1000)
 
-    # 1 创建模型数据  继承nn.Module
-    policy = make_policy(config['policy_class'], config['policy_config'])
-    # print("model structure\n", policy.model)
-    
-    # 2 加载模型权重
-    ckpt_path = os.path.join(config['ckpt_dir'], config['ckpt_name'])
-    state_dict = torch.load(ckpt_path)
-    new_state_dict = {}
-    for key, value in state_dict.items():
-        if key in ["model.is_pad_head.weight", "model.is_pad_head.bias"]:
-            continue
-        if key in ["model.input_proj_next_action.weight", "model.input_proj_next_action.bias"]:
-            continue
-        new_state_dict[key] = value
-    loading_status = policy.deserialize(new_state_dict)
-    if not loading_status:
-        print("ckpt path not exist")
-        return False
+    # 1 创建模型
+    if config['policy_class'] == 'MotoGPT':
+        # MotoGPT handles its own loading in __init__
+        policy = make_policy(config['policy_class'], config['policy_config'], args)
+        
+        # 4 加载统计值 (MotoGPT uses torch.load format)
+        stats_path = os.path.join(args.stats_dir, config['ckpt_stats_name'])
+        print(f"Loading stats from {stats_path}")
+        stats = torch.load(stats_path, map_location='cpu')
+    else:
+        # 1 创建模型数据  继承nn.Module
+        policy = make_policy(config['policy_class'], config['policy_config'])
+        # print("model structure\n", policy.model)
+        
+        # 2 加载模型权重
+        ckpt_path = os.path.join(config['ckpt_dir'], config['ckpt_name'])
+        state_dict = torch.load(ckpt_path)
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            if key in ["model.is_pad_head.weight", "model.is_pad_head.bias"]:
+                continue
+            if key in ["model.input_proj_next_action.weight", "model.input_proj_next_action.bias"]:
+                continue
+            new_state_dict[key] = value
+        loading_status = policy.deserialize(new_state_dict)
+        if not loading_status:
+            print("ckpt path not exist")
+            return False
 
-    # 3 模型设置为cuda模式和验证模式
-    policy.cuda()
-    policy.eval()
+        # 3 模型设置为cuda模式和验证模式
+        policy.cuda()
+        policy.eval()
 
-    # 4 加载统计值
-    stats_path = os.path.join(config['ckpt_dir'], config['ckpt_stats_name'])
-    # 统计的数据  # 加载action_mean, action_std, qpos_mean, qpos_std 14维
-    with open(stats_path, 'rb') as f:
-        stats = pickle.load(f)
+        # 4 加载统计值
+        stats_path = os.path.join(config['ckpt_dir'], config['ckpt_stats_name'])
+        # 统计的数据  # 加载action_mean, action_std, qpos_mean, qpos_std 14维
+        with open(stats_path, 'rb') as f:
+            stats = pickle.load(f)
 
     # 数据预处理和后处理函数定义
     pre_process = lambda s_qpos: (s_qpos - stats['qpos_mean']) / stats['qpos_std']
@@ -323,7 +564,7 @@ def model_inference(args, config, ros_operator, save_episode=True):
             while t < max_publish_step and not rospy.is_shutdown():
                 # start_time = time.time()
                 # query policy
-                if config['policy_class'] == "ACT":
+                if config['policy_class'] == "ACT" or config['policy_class'] == "MotoGPT":
                     if t >= max_t:
                         pre_action = action
                         inference_thread = threading.Thread(target=inference_process,
@@ -753,7 +994,29 @@ def get_arguments():
     parser.add_argument('--action_horizon', action='store', type=int, help='action_horizon', default=8, required=False)
     parser.add_argument('--num_inference_timesteps', action='store', type=int, help='num_inference_timesteps', default=10, required=False)
     parser.add_argument('--ema_power', action='store', type=int, help='ema_power', default=0.75, required=False)
+    
+    # for MotoGPT
+    parser.add_argument('--stats_dir', action='store', type=str, help='stats_dir for MotoGPT', default=None, required=False)
+    parser.add_argument('--language_instruction', action='store', type=str, help='language instruction for MotoGPT', default='', required=False)
+    parser.add_argument('--crop_image', action='store_true', help='whether to crop image for MotoGPT')
+    parser.add_argument('--crop_left', action='store', type=int, help='crop_left for MotoGPT', default=120, required=False)
+    parser.add_argument('--crop_right', action='store', type=int, help='crop_right for MotoGPT', default=40, required=False)
+    
     args = parser.parse_args()
+    
+    # Set default rgb_preprocessor_config for MotoGPT
+    if args.policy_class == 'MotoGPT':
+        args.rgb_preprocessor_config = {
+            'model_vision_type': "mae",
+            'vision_aug_config': {
+                'do_random_resized_crop': False,
+                'do_random_shift': False
+            }
+        }
+        # Set stats_dir to ckpt_dir if not specified
+        if args.stats_dir is None:
+            args.stats_dir = args.ckpt_dir
+    
     return args
 
 

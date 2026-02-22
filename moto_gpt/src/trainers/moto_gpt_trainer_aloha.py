@@ -204,6 +204,12 @@ class MotoGPT_Trainer:
 
                     self.moto_gpt.train()
                     self.optimizer.zero_grad()
+                    if 'lang_input_ids' in batch:
+                        vocab_size = getattr(self.moto_gpt.module.model_lang.config, 'vocab_size', 32128) if hasattr(self.moto_gpt, 'module') else getattr(self.moto_gpt.model_lang.config, 'vocab_size', 32128)
+                        if (batch['lang_input_ids'] >= vocab_size).any():
+                            if self.is_main:
+                                print(f"WARNING: Detected out-of-vocab token IDs in batch! Max ID: {batch['lang_input_ids'].max()}. Clamping to {vocab_size-1}.")
+                            batch['lang_input_ids'] = torch.clamp(batch['lang_input_ids'], min=0, max=vocab_size-1)
                     loss = self.calculate_loss(batch, train=True)
                     self.accelerator.backward(loss['total_loss'])
                     self.optimizer.step()

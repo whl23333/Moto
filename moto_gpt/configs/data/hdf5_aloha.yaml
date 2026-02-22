@@ -1,11 +1,11 @@
 data_type: "hdf5_aloha"
-hdf5_dir: "/media/disk3/WHL/aloha_cup_plate"
+hdf5_dir: "/media/disk3/WHL/aloha_single_traj"
 rgb_shape: [480, 640]
 skip_frame: 5
 
 # Normalization configuration
 use_normalization: true
-norm_stats_path: "/home/hlwang/Moto/norm_stats/norm_stats.pt"
+norm_stats_path: "/home/hlwang/Moto/norm_stats/cup_plate_single_traj/norm_stats.pt"
 use_robot_base: false
 
 # Camera configuration
